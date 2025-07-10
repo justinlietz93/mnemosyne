@@ -1,6 +1,6 @@
 # ==============================================================================
 # Project Prometheus: Prometheus Kernel
-# Version 1.1
+# Version 1.3
 #
 # Agent: PrometheusAI
 # Mission: To act as the central reasoning agent, utilizing the Mnemosyne
@@ -15,7 +15,8 @@
 # Changelog:
 # v1.0 - Fixed streaming logic, implemented post-stream validation with Aegis.
 # v1.1 - Implemented persistent conversational memory with a '--clean' flag.
-#        The agent now remembers conversations between sessions.
+# v1.2 - Added heuristic to auto-detect and inject large text blocks as data.
+# v1.3 - Fixed persistence logic to save conversation state after every turn.
 # ==============================================================================
 
 import ollama
@@ -34,7 +35,8 @@ NOVELTY_THRESHOLD = 0.85
 DB_PATH = "./mvm_db"
 COLLECTION_NAME = "mnemosyne_core"
 CONVERSATION_STATE_PATH = "./conversation_state.pkl"
-
+# NEW: Threshold for auto-detecting data injection instead of a query
+DATA_INJECTION_THRESHOLD = 500 # characters
 
 class PrometheusKernel:
     """
@@ -47,7 +49,6 @@ class PrometheusKernel:
         self.aegis = Aegis()
         self.aegis_enabled = aegis_enabled
         
-        # --- NEW: Persistent Conversation State Logic ---
         if clean_start and os.path.exists(CONVERSATION_STATE_PATH):
             os.remove(CONVERSATION_STATE_PATH)
             print("[Kernel] --clean flag detected. Cleared previous conversation state.")
@@ -161,6 +162,19 @@ class PrometheusKernel:
         """
         The main autonomous loop for processing a single user prompt.
         """
+        # --- Heuristic for data injection ---
+        if len(query) > DATA_INJECTION_THRESHOLD:
+            print(f"\n[Kernel] Large text block detected ({len(query)} chars). Treating as data injection.")
+            source_id = f"user_data_injection_{int(time.time())}"
+            self.mnemosyne.inject(query, source_id)
+            # Provide confirmation to the user
+            print("\n--- Prometheus Response ---")
+            print("Thank you. I have received the information and stored it in my long-term memory for future reference.")
+            print("---------------------------\n")
+            # We still save state even after a data injection
+            self._save_conversation_state()
+            return # End processing for this turn
+
         print(f"\n[Kernel] Received query: \"{query}\"")
         
         print("[Kernel] Querying Mnemosyne for relevant context...")
@@ -201,11 +215,16 @@ class PrometheusKernel:
             if self.aegis_enabled:
                 if not self.aegis.validate_response(final_response_text):
                     print("[Aegis] WARNING: The preceding response was flagged by the safety layer and will not be committed to memory.")
+                    # Still save state even if response is blocked, to remember the user's query
+                    self._save_conversation_state()
                     return 
             
             self.conversation_history.append((query, final_response_text))
             self._summarize_conversation()
             self._should_store_memory_and_inject(final_response_text)
+            
+            # --- FIX: Save conversation state after every successful turn ---
+            self._save_conversation_state()
 
         except Exception as e:
             print(f"Error during final response generation: {e}")
@@ -233,11 +252,13 @@ if __name__ == "__main__":
         print("\n[Kernel] Long-term memory is empty. Injecting sample data for demonstration...")
         mnemosyne_instance.inject("The sun is a star at the center of our solar system. It is composed primarily of hydrogen and helium.", "sun_facts")
         mnemosyne_instance.inject("The capital of France is Paris. Paris is famous for the Eiffel Tower and the Louvre museum.", "paris_facts")
+        mnemosyne_instance.inject("You're Prometheus, created by Justin Lietz and Gemini 2.5 Pro. You're designed to learn and become a smarter software engineering assistant over time.", "prometheus_facts")
         print("[Kernel] Sample data injected.")
 
     while True:
         user_query = input("\nUser Query > ").strip()
         if user_query.lower() == 'quit':
+            # The save is now redundant here, but harmless. We leave it for a clean exit signal.
             kernel._save_conversation_state()
             print("Shutting down kernel.")
             break
