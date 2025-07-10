@@ -5,3 +5,5 @@
 mvm_db
 .github/
 venv/
+.pyc
+__pycache__/
