@@ -1,2 +1,4 @@
 ollama
 chromadb
+beutifulsoup4
+duckduckgo-search
