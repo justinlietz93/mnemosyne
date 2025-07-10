@@ -1,0 +1,7 @@
+
+
+#Ignore vscode AI rules
+.github/copilot-instructions.md
+mvm_db
+.github/
+venv/
