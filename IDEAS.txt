@@ -1,2 +1,0 @@
-saving NEGATIVE REWARD memories as such
-running the memory storage and retrieval detached from the CLI so the user can ask another question right away, or dramatically improving the speed (can wait)

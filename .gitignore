@@ -7,3 +7,5 @@ mvm_db
 venv/
 .pyc
 __pycache__/
+plans/*
+.pkl
