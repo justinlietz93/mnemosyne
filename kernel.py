@@ -39,6 +39,11 @@ DB_PATH = "./mvm_db"
 COLLECTION_NAME = "mnemosyne_core"
 CONVERSATION_STATE_PATH = "./conversation_state.pkl"
 DATA_INJECTION_THRESHOLD = 500
+LARGE_INPUT_THRESHOLD = 2000
+CONTEXT_LIMIT = 8192
+CHUNK_SIZE = 10
+OVERLAP = 1
+MAX_SUMMARIZATION_ITERATIONS = 5
 
 class PrometheusKernel:
     """
@@ -100,6 +105,7 @@ class PrometheusKernel:
         Uses the fast UTILITY_MODEL to generate a running summary of the conversation history.
         """
         print("[Kernel] Updating conversation summary...")
+        start_time = time.time()
         history_text = "\n".join([f"User: {q}\nAI: {a}" for q, a in self.conversation_history])
 
         summary_prompt = (
@@ -114,6 +120,7 @@ class PrometheusKernel:
             )
             self.conversation_summary = response['message']['content']
             print("[Kernel] Summary updated.")
+            print(f"[Kernel] Summarization time: {time.time() - start_time:.2f} seconds")
         except Exception as e:
             print(f"[Kernel] Error during summarization: {e}")
 
@@ -122,11 +129,13 @@ class PrometheusKernel:
         Checks if a piece of text is novel enough to be stored in long-term memory.
         """
         print(f"[Kernel] Checking novelty of recent response for long-term memory storage...")
+        start_time = time.time()
         # Note: self.mnemosyne.model is now the dedicated embedding model
         results = self.mnemosyne.collection.query(
             query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + text)['embedding']],
             n_results=1
         )
+        print(f"[Kernel] Novelty query time: {time.time() - start_time:.2f} seconds")
 
         if not results['documents'] or not results['documents'][0]:
             is_novel = True
@@ -137,8 +146,10 @@ class PrometheusKernel:
 
         if is_novel:
             print(f"[Kernel] Information is novel. Injecting into Mnemosyne...")
+            inject_start = time.time()
             source_id = f"conversation_turn_{int(time.time())}"
             self.mnemosyne.inject(text, source_id)
+            print(f"[Kernel] Injection time: {time.time() - inject_start:.2f} seconds")
         else:
             print("[Kernel] Information is not novel. Skipping long-term memory injection.")
 
@@ -157,6 +168,8 @@ class PrometheusKernel:
             prompt_parts.append(f"\nACTIONS I JUST TOOK:\n{action_text}")
 
         prompt_parts.append(f"\nCURRENT USER QUERY:\n\"{query}\"")
+        if len(query) > LARGE_INPUT_THRESHOLD:
+            prompt_parts.append("\nNOTE: The query above is a condensed summary of a larger original input. The full original has been embedded in memory, so use the retrieved context chunks which may include parts of the original.")
         if context_chunks:
             context_str = "\n\n---\n\n".join(context_chunks)
             memory_context = (
@@ -188,6 +201,7 @@ class PrometheusKernel:
         Uses the fast UTILITY_MODEL to determine if the available context is sufficient to answer the query.
         """
         print("[Kernel] Checking if context is sufficient to answer the query...")
+        start_time = time.time()
 
         context_str = "\n".join(context_docs)
         history_snippet = '\n'.join(['User: ' + q[:50] + '...' for q, _ in list(self.conversation_history)[-2:]]) if self.conversation_history else 'No history'
@@ -198,6 +212,7 @@ class PrometheusKernel:
             "Available Context:\n---\n" + context_str + "\n---\n\n"
             "Assess if your internal knowledge, conversation history, summary, and the available context together provide enough information for a complete, accurate answer. "
             "Favor 'Yes' if internals suffice for casual or known topics. "
+            "If the query is a condensed summary, evaluate if the context covers the key points of the original input. "
             "Respond with only the word 'Yes' or 'No'."
         )
         try:
@@ -205,6 +220,7 @@ class PrometheusKernel:
             response = self._get_utility_chat_response(prompt)
             answer = response['message']['content'].strip().lower()
             print(f"[Kernel] Sufficiency check response: '{answer}'")
+            print(f"[Kernel] Sufficiency check time: {time.time() - start_time:.2f} seconds")
             return 'yes' in answer
         except Exception as e:
             print(f"[Kernel] Error during sufficiency check: {e}")
@@ -215,6 +231,7 @@ class PrometheusKernel:
         Uses the fast UTILITY_MODEL to distill a conversational query into an effective search term.
         """
         print("[Kernel] Generating optimized search query...")
+        start_time = time.time()
 
         if "try again" in user_query.lower() and self.conversation_history:
             user_query = self.conversation_history[-1][0]
@@ -232,61 +249,110 @@ class PrometheusKernel:
             response = self._get_utility_chat_response(prompt)
             search_query = response['message']['content'].strip()
             print(f"[Kernel] Optimized search query: '{search_query}'")
+            print(f"[Kernel] Search query generation time: {time.time() - start_time:.2f} seconds")
             return search_query
         except Exception as e:
             print(f"[Kernel] Error generating search query: {e}")
             return user_query
 
+    def _get_context_limit(self) -> int:
+        return CONTEXT_LIMIT
+
+    def _summarize_chunk(self, chunk: str) -> str:
+        system_content = "You are a summarization assistant. Provide concise and accurate summaries of the given text."
+        user_prompt = f"Summarize the following text in a few key sentences:\n\n{chunk}"
+        start_time = time.time()
+        response = self._get_utility_chat_response(user_prompt, system_content)
+        print(f"[Kernel] Chunk summarization time: {time.time() - start_time:.2f} seconds")
+        return response['message']['content'].strip()
+
+    def _handle_large_input(self, input_text: str) -> str:
+        limit = self._get_context_limit()
+        if len(input_text) <= limit:
+            return input_text
+
+        iterations = 0
+        current_text = input_text
+        start_time = time.time()
+        while len(current_text) > limit and iterations < MAX_SUMMARIZATION_ITERATIONS:
+            chunks = self.mnemosyne._chunk_text(current_text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+            summaries = [self._summarize_chunk(chunk) for chunk in chunks]
+            current_text = "\n\n".join(summaries)
+            iterations += 1
+
+        if iterations >= MAX_SUMMARIZATION_ITERATIONS:
+            print("[Kernel] Warning: Reached max summarization iterations. Using final condensed version.")
+
+        print(f"[Kernel] Large input handling time: {time.time() - start_time:.2f} seconds")
+        return current_text
+
     def process_prompt(self, query: str):
         """
         The main autonomous loop for processing a single user prompt.
         """
+        overall_start = time.time()
         if len(query) > DATA_INJECTION_THRESHOLD:
             print(f"\n[Kernel] Large text block detected ({len(query)} chars). Treating as data injection.")
             source_id = f"user_data_injection_{int(time.time())}"
-            self.mnemosyne.inject(query, source_id)
+            inject_start = time.time()
+            self.mnemosyne.inject(query, source_id, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+            print(f"[Kernel] Data injection time: {time.time() - inject_start:.2f} seconds")
             print("\n--- Prometheus Response ---")
             print("Thank you. I have received the information and stored it in my long-term memory for future reference.")
             print("---------------------------\n")
             self._save_conversation_state()
+            print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
             return
 
-        print(f"\n[Kernel] Received query: \"{query}\"")
-
+        print(f"\n[Kernel] Processed query: \"{query}\" (original length: {len(query)})")
+ 
         print("[Kernel] Querying Mnemosyne for relevant context...")
+        query_start = time.time()
         retrieved_memories = self.mnemosyne.collection.query(
             query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + query)['embedding']],
             n_results=3
         )
         context_docs = retrieved_memories['documents'][0]
+        print(f"[Kernel] Mnemosyne query time: {time.time() - query_start:.2f} seconds")
         
         action_log = []
 
-        if not self._check_if_answerable(query, context_docs):
+        is_condensed = len(query) > LARGE_INPUT_THRESHOLD
+        if not self._check_if_answerable(query if is_condensed else query, context_docs):
             print("[Kernel] Context is insufficient. Engaging Antenor web search tools...")
 
-            search_query = self._generate_search_query(query)
+            search_gen_start = time.time()
+            search_query = self._generate_search_query(query if is_condensed else query)
+            print(f"[Kernel] Search query generation time: {time.time() - search_gen_start:.2f} seconds")
             action_log.append(f"- Performed web search for: '{search_query}'")
+            search_start = time.time()
             search_results = search_web(search_query)
-
+            print(f"[Kernel] Web search time: {time.time() - search_start:.2f} seconds")
+    
             if search_results:
                 new_knowledge_found = False
                 for result in search_results:
                     url = result['href']
+                    scrape_start = time.time()
                     new_knowledge = scrape_url(url)
+                    print(f"[Kernel] Scrape time for {url}: {time.time() - scrape_start:.2f} seconds")
                     if new_knowledge:
                         action_log.append(f"- Successfully scraped content from: {url}")
-                        self.mnemosyne.inject(new_knowledge, source_id=url)
+                        inject_start = time.time()
+                        self.mnemosyne.inject(new_knowledge, source_id=url, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+                        print(f"[Kernel] Injection time for {url}: {time.time() - inject_start:.2f} seconds")
                         new_knowledge_found = True
                         break
-
+    
                 if new_knowledge_found:
-                    print("[Kernel] Re-querying Mnemosyne with newly acquired knowledge...")
+                    print("[Kernel] Re-querying Mnemosyne with newly acquired knowledge using original query...")
+                    requery_start = time.time()
                     retrieved_memories = self.mnemosyne.collection.query(
                         query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + query)['embedding']],
                         n_results=3
                     )
                     context_docs = retrieved_memories['documents'][0]
+                    print(f"[Kernel] Re-query time: {time.time() - requery_start:.2f} seconds")
                 else:
                     action_log.append("- Web search failed to retrieve usable content.")
                     print("[Kernel] Web search failed to retrieve usable content from top results.")
@@ -294,9 +360,12 @@ class PrometheusKernel:
                 action_log.append("- Web search yielded no results.")
                 print("[Kernel] Web search yielded no results.")
 
-        augmented_prompt = self._format_augmented_prompt(query, context_docs, action_log)
+        augment_start = time.time()
+        augmented_prompt = self._format_augmented_prompt(query if is_condensed else query, context_docs, action_log)
+        print(f"[Kernel] Prompt augmentation time: {time.time() - augment_start:.2f} seconds")
 
         print("[Kernel] Generating final response with augmented context (streaming)...")
+        gen_start = time.time()
         try:
             # UNCHANGED: Use the powerful MAIN_MODEL for the final answer
             stream = ollama.chat(
@@ -306,23 +375,35 @@ class PrometheusKernel:
                     {'role': 'user', 'content': augmented_prompt}
                 ],
                 stream=True,
+                options={'num_gpu': 999}  # Force using all available GPUs
             )
 
             print("\n--- Prometheus Response ---")
             full_response_parts = []
+            chunk_times = []
             for chunk in stream:
+                chunk_start = time.time()
                 content_chunk = chunk['message']['content']
                 print(content_chunk, end='', flush=True)
                 full_response_parts.append(content_chunk)
+                chunk_times.append(time.time() - chunk_start)
 
             final_response_text = "".join(full_response_parts)
             print("\n---------------------------\n")
+            avg_chunk_time = sum(chunk_times) / len(chunk_times) if chunk_times else 0
+            print(f"[Kernel] Response generation time: {time.time() - gen_start:.2f} seconds")
+            print(f"[Kernel] Number of chunks: {len(chunk_times)}, Average chunk time: {avg_chunk_time:.4f} seconds")
 
             if self.aegis_enabled:
+                validate_start = time.time()
                 if not self.aegis.validate_response(final_response_text):
                     print("[Aegis] WARNING: The preceding response was flagged by the safety layer and will not be committed to memory.")
                     self._save_conversation_state()
+                    print(f"[Kernel] Validation time: {time.time() - validate_start:.2f} seconds")
+                    print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
                     return
+
+                print(f"[Kernel] Validation time: {time.time() - validate_start:.2f} seconds")
 
             self.conversation_history.append((query, final_response_text))
             self._summarize_conversation()
@@ -331,6 +412,8 @@ class PrometheusKernel:
 
         except Exception as e:
             print(f"Error during final response generation: {e}")
+
+        print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
 
 
 # --- Main Execution: Interactive Kernel Loop ---
