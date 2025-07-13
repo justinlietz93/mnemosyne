@@ -1,6 +1,6 @@
 # ==============================================================================
 # Project Prometheus: Prometheus Kernel
-# Version 2.0
+# Version 2.1
 #
 # Agent: PrometheusAI
 # Mission: To act as the central reasoning agent, utilizing the Mnemosyne
@@ -10,13 +10,12 @@
 # This script defines the PrometheusKernel class. The kernel takes user input,
 # autonomously queries the Mnemosyne memory core for relevant context,
 # constructs an augmented prompt, and then uses a language model to generate
-# a final, informed answer. This is the first step toward true autonomy.
+# a final, informed answer.
 #
 # Changelog:
-# v1.9 - Made the system prompt more forceful to ensure the agent acknowledges
-#        and uses the results of its tool actions, preventing hallucinations.
-# v2.0 - Merged user's preferred prompt with the critical tool-use instructions,
-#        restoring the naturalistic memory handling while ensuring self-awareness.
+# v2.1 - Implemented multi-model architecture. Uses a small, fast utility model
+#        for internal tasks (summaries, checks) and a large, powerful model
+#        for final response generation to improve performance.
 # ==============================================================================
 
 import ollama
@@ -30,7 +29,10 @@ import pickle
 import os
 
 # --- Configuration ---
-OLLAMA_MODEL = 'nemotron:70b'
+MAIN_MODEL = 'nemotron:70b'            # The powerful model for final answers
+UTILITY_MODEL = 'gemma3:4b'           # A small, fast model for internal tasks
+EMBEDDING_MODEL = 'nomic-embed-text'  # A dedicated model for embeddings
+
 HISTORY_LENGTH = 5
 NOVELTY_THRESHOLD = 0.85
 DB_PATH = "./mvm_db"
@@ -42,10 +44,11 @@ class PrometheusKernel:
     """
     The core reasoning agent. It orchestrates memory and language models.
     """
-    def __init__(self, mnemosyne_instance: Mnemosyne, llm_model: str, aegis_enabled: bool = True, clean_start: bool = False):
+    def __init__(self, mnemosyne_instance: Mnemosyne, llm_model: str, utility_model: str, aegis_enabled: bool = True, clean_start: bool = False):
         print("Initializing Prometheus Kernel...")
         self.mnemosyne = mnemosyne_instance
         self.llm_model = llm_model
+        self.utility_model = utility_model # New model for internal tasks
         self.aegis = Aegis()
         self.aegis_enabled = aegis_enabled
 
@@ -55,7 +58,6 @@ class PrometheusKernel:
 
         self._load_conversation_state()
 
-        # --- FIX: Merged user's preferred prompt with critical tool-use logic ---
         self.system_prompt = (
             "You are Prometheus, a helpful AI assistant with a vast internal knowledge base, a long-term memory, and the ability to browse the web. "
             "You will be given a user's query and context from your memory, conversation history, and a list of actions you just performed. "
@@ -65,6 +67,7 @@ class PrometheusKernel:
             "CRITICAL INSTRUCTION: If your 'ACTIONS I JUST TOOK' list shows you performed a web search, you MUST acknowledge this action and base your response on the new information you found. Do NOT state that you do not have internet access or that your knowledge is cut off if you have just successfully used a web tool. "
             "Finally, and very importantly, DO NOT mention your memories UNLESS it's useful context to add AND you phrase it as \"I remember\" or \"I'm reminded that\", OR the user specifically asks."
         )
+        print(f"Main Model: {self.llm_model} | Utility Model: {self.utility_model}")
         print(f"Aegis Safety Layer is {'ENABLED' if self.aegis_enabled else 'DISABLED'}.")
         print("Prometheus Kernel initialized successfully.")
 
@@ -94,7 +97,7 @@ class PrometheusKernel:
 
     def _summarize_conversation(self):
         """
-        Uses the LLM to generate a running summary of the conversation history.
+        Uses the fast UTILITY_MODEL to generate a running summary of the conversation history.
         """
         print("[Kernel] Updating conversation summary...")
         history_text = "\n".join([f"User: {q}\nAI: {a}" for q, a in self.conversation_history])
@@ -104,8 +107,9 @@ class PrometheusKernel:
         )
 
         try:
+            # CHANGED: Use the fast utility model for this internal task
             response = ollama.chat(
-                model=self.llm_model,
+                model=self.utility_model,
                 messages=[{'role': 'user', 'content': summary_prompt}]
             )
             self.conversation_summary = response['message']['content']
@@ -118,6 +122,7 @@ class PrometheusKernel:
         Checks if a piece of text is novel enough to be stored in long-term memory.
         """
         print(f"[Kernel] Checking novelty of recent response for long-term memory storage...")
+        # Note: self.mnemosyne.model is now the dedicated embedding model
         results = self.mnemosyne.collection.query(
             query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + text)['embedding']],
             n_results=1
@@ -164,28 +169,40 @@ class PrometheusKernel:
         prompt_parts.append("\nBased on all the information provided, please answer the current user query.")
         return "\n".join(prompt_parts)
 
+    
+    def _get_utility_chat_response(self, user_prompt: str, system_content: str = None):
+        """Helper to get a chat response from the fast UTILITY_MODEL."""
+        messages = []
+        if system_content:
+            messages.append({'role': 'system', 'content': system_content})
+        messages.append({'role': 'user', 'content': user_prompt})
+        try:
+            return ollama.chat(model=self.utility_model, messages=messages)
+        except Exception as e:
+            print(f"[Kernel] Utility chat failed: {e}")
+            # As a last resort, return a default value to prevent crashing
+            return {'message': {'content': ''}}
+
     def _check_if_answerable(self, query: str, context_docs: list) -> bool:
         """
-        Uses the LLM to determine if the available context is sufficient to answer the query.
+        Uses the fast UTILITY_MODEL to determine if the available context is sufficient to answer the query.
         """
         print("[Kernel] Checking if context is sufficient to answer the query...")
-        if not context_docs:
-            print("[Kernel] No context found, sufficiency is definitively No.")
-            return False
 
         context_str = "\n".join(context_docs)
+        history_snippet = '\n'.join(['User: ' + q[:50] + '...' for q, _ in list(self.conversation_history)[-2:]]) if self.conversation_history else 'No history'
         prompt = (
-            f"User Query: \"{query}\"\n\n"
-            f"Available Context:\n---\n{context_str}\n---\n\n"
-            "Does the 'Available Context' contain a direct and specific answer to the User Query? "
-            "The context must explicitly contain the information needed to fully answer the question. "
+            "CONVERSATION SUMMARY:\n" + self.conversation_summary + "\n\n"
+            "RECENT HISTORY SNIPPET:\n" + history_snippet + "\n\n"
+            'User Query: "' + query + '"\n\n'
+            "Available Context:\n---\n" + context_str + "\n---\n\n"
+            "Assess if your internal knowledge, conversation history, summary, and the available context together provide enough information for a complete, accurate answer. "
+            "Favor 'Yes' if internals suffice for casual or known topics. "
             "Respond with only the word 'Yes' or 'No'."
         )
         try:
-            response = ollama.chat(
-                model=self.llm_model,
-                messages=[{'role': 'user', 'content': prompt}]
-            )
+            # CHANGED: Use the fast utility model for this check
+            response = self._get_utility_chat_response(prompt)
             answer = response['message']['content'].strip().lower()
             print(f"[Kernel] Sufficiency check response: '{answer}'")
             return 'yes' in answer
@@ -195,7 +212,7 @@ class PrometheusKernel:
 
     def _generate_search_query(self, user_query: str) -> str:
         """
-        Uses the LLM to distill a conversational query into an effective search term.
+        Uses the fast UTILITY_MODEL to distill a conversational query into an effective search term.
         """
         print("[Kernel] Generating optimized search query...")
 
@@ -204,15 +221,15 @@ class PrometheusKernel:
             print(f"[Kernel] 'Try again' detected. Using previous query: '{user_query}'")
 
         prompt = (
-            f"Based on the following user query, generate a concise and effective search engine query of 3-5 keywords. "
-            f"Do not use conversational language. Only return the keywords.\n\n"
+            "Distill the user query into exactly 3-5 space-separated keywords for a search engine. "
+            "Output NOTHING ELSE—no explanations, no punctuation, no quotes. "
+            "Example input: 'What is the capital of France?' "
+            "Example output: France capital city\n\n"
             f"User Query: \"{user_query}\""
         )
         try:
-            response = ollama.chat(
-                model=self.llm_model,
-                messages=[{'role': 'user', 'content': prompt}]
-            )
+            # CHANGED: Use the fast utility model for this task
+            response = self._get_utility_chat_response(prompt)
             search_query = response['message']['content'].strip()
             print(f"[Kernel] Optimized search query: '{search_query}'")
             return search_query
@@ -281,6 +298,7 @@ class PrometheusKernel:
 
         print("[Kernel] Generating final response with augmented context (streaming)...")
         try:
+            # UNCHANGED: Use the powerful MAIN_MODEL for the final answer
             stream = ollama.chat(
                 model=self.llm_model,
                 messages=[
@@ -322,10 +340,14 @@ if __name__ == "__main__":
     parser.add_argument('--clean', action='store_true', help="Start a new conversation session, clearing previous state.")
     args = parser.parse_args()
 
-    mnemosyne_instance = Mnemosyne(db_path=DB_PATH, collection_name=COLLECTION_NAME, model=OLLAMA_MODEL)
+    # CHANGED: Instantiate Mnemosyne with the dedicated embedding model
+    mnemosyne_instance = Mnemosyne(db_path=DB_PATH, collection_name=COLLECTION_NAME, model=EMBEDDING_MODEL)
+    
+    # CHANGED: Instantiate the kernel with both a main and a utility model
     kernel = PrometheusKernel(
         mnemosyne_instance=mnemosyne_instance,
-        llm_model=OLLAMA_MODEL,
+        llm_model=MAIN_MODEL,
+        utility_model=UTILITY_MODEL,
         aegis_enabled=not args.aegis_off,
         clean_start=args.clean
     )

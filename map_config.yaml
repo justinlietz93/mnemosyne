@@ -1,0 +1,141 @@
+# Universal Codebase XML Generator Configuration
+# This file contains all configurable settings for the codebase generator
+
+# File Processing Settings
+file_processing:
+  max_file_size_mb: 10.0          # Maximum file size to include in MB
+  max_content_size_kb: 100        # Maximum content size per file in KB
+  include_hidden: false           # Include hidden files and directories
+  ignore_gitignore: false         # Ignore .gitignore patterns completely
+
+# Output Settings  
+output:
+  output_dir: "./output"          # Directory to save output files
+  xml_only: false                 # Generate only XML output
+  ascii_only: false               # Generate only ASCII map
+  combined_output: true           # Create combined file with both formats
+
+# Additional Exclusion Patterns
+exclusions:
+  # Additional file patterns to exclude (beyond .gitignore and built-in patterns)
+  additional_patterns: []
+  # Example patterns (uncomment to use):
+  # additional_patterns:
+  #   - "*.tmp"
+  #   - "backup_*"
+  #   - "test_data/"
+
+# Critical Directories (automatically skipped)
+critical_skip_dirs:
+  - "mvm_db"
+  - "__pycache__"
+  - "venv"
+  - "env" 
+  - "ENV"
+  - ".venv"
+  - ".env"
+  - "virtualenv"
+  - "node_modules"
+  - ".git"
+  - ".svn"
+  - ".hg"
+  - "build"
+  - "dist"
+  - "lib"
+  - "lib64"
+  - ".cache"
+  - "cache"
+  - "tmp"
+  - "temp"
+  - ".mypy_cache"
+  - ".pytest_cache"
+  - "htmlcov"
+  - ".tox"
+  - ".coverage"
+  - "logs"
+  - ".eggs"
+  - "eggs"
+  - "wheels"
+  - "parts"
+  - "var"
+  - "downloads"
+  - "output"
+
+# File Extensions to Skip (cache/binary files)
+skip_extensions:
+  - ".pyc"
+  - ".pyo" 
+  - ".pyd"
+  - ".so"
+  - ".dll"
+  - ".dylib"
+  - ".exe"
+  - ".bin"
+  - ".log"
+  - ".bak"
+  - ".backup"
+  - ".old"
+  - ".swp"
+  - ".swo"
+
+# Text File Extensions (files to include content for)
+text_extensions:
+  - ".txt"
+  - ".md"
+  - ".rst"
+  - ".py"
+  - ".js"
+  - ".ts"
+  - ".html"
+  - ".css"
+  - ".scss"
+  - ".yaml"
+  - ".yml"
+  - ".json"
+  - ".xml"
+  - ".ini"
+  - ".cfg"
+  - ".conf"
+  - ".toml"
+  - ".sh"
+  - ".bash"
+  - ".bat"
+  - ".ps1"
+  - ".sql"
+  - ".r"
+  - ".rb"
+  - ".go"
+  - ".rs"
+  - ".java"
+  - ".c"
+  - ".cpp"
+  - ".h"
+  - ".hpp"
+  - ".cs"
+  - ".php"
+  - ".pl"
+  - ".swift"
+  - ".kt"
+  - ".scala"
+  - ".clj"
+  - ".hs"
+  - ".elm"
+  - ".vue"
+  - ".svelte"
+  - ".jsx"
+  - ".tsx"
+  - ".dockerfile"
+  - ".gitignore"
+  - ".gitattributes"
+  - ".editorconfig"
+
+# Logging Settings
+logging:
+  level: "INFO"                   # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true              # Create log file
+  log_filename: "codebase_generator.log"
+
+# Performance Settings
+performance:
+  encoding_detection_size_kb: 8   # Size of sample for encoding detection
+  text_detection_sample_kb: 1     # Size of sample for text file detection

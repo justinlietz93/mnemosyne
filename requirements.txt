@@ -1,4 +1,10 @@
+# Mnemosyne dependencies
 ollama
 chromadb
 beautifulsoup4
 duckduckgo-search
+sentence-transformers
+
+# Additional dependencies for specific features
+chardet
+ 
