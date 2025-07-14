@@ -27,6 +27,7 @@ import time
 import argparse
 import pickle
 import os
+import re
 
 # --- Configuration ---
 MAIN_MODEL = 'nemotron:70b'            # The powerful model for final answers
@@ -124,6 +125,12 @@ class PrometheusKernel:
         except Exception as e:
             print(f"[Kernel] Error during summarization: {e}")
 
+    def _generate_summary(self, text: str) -> str:
+        """Generates a summary using the utility model."""
+        prompt = f"Provide a brief summary of the following text: {text}"
+        response = self._get_utility_chat_response(prompt)
+        return response['message']['content'].strip()
+
     def _should_store_memory_and_inject(self, text: str):
         """
         Checks if a piece of text is novel enough to be stored in long-term memory.
@@ -148,14 +155,16 @@ class PrometheusKernel:
             print(f"[Kernel] Information is novel. Injecting into Mnemosyne...")
             inject_start = time.time()
             source_id = f"conversation_turn_{int(time.time())}"
-            self.mnemosyne.inject(text, source_id)
+            summary = self._generate_summary(text)
+            metadata = {"source": "conversation", "summary": summary}
+            self.mnemosyne.inject(text, source_id, metadata=metadata)
             print(f"[Kernel] Injection time: {time.time() - inject_start:.2f} seconds")
         else:
             print("[Kernel] Information is not novel. Skipping long-term memory injection.")
 
-    def _format_augmented_prompt(self, query: str, context_chunks: list, action_history: list) -> str:
+    def _format_augmented_prompt(self, query: str, results: dict, action_history: list) -> str:
         """
-        Formats the final prompt for the LLM, combining all context sources.
+        Formats the final prompt for the LLM, combining all context sources including metadata.
         """
         prompt_parts = []
         prompt_parts.append(f"CONVERSATION SUMMARY:\n{self.conversation_summary}")
@@ -170,12 +179,22 @@ class PrometheusKernel:
         prompt_parts.append(f"\nCURRENT USER QUERY:\n\"{query}\"")
         if len(query) > LARGE_INPUT_THRESHOLD:
             prompt_parts.append("\nNOTE: The query above is a condensed summary of a larger original input. The full original has been embedded in memory, so use the retrieved context chunks which may include parts of the original.")
-        if context_chunks:
-            context_str = "\n\n---\n\n".join(context_chunks)
+
+        if results['documents'] and results['documents'][0]:
+            memory_parts = []
+            for i in range(len(results['documents'][0])):
+                doc = results['documents'][0][i]
+                meta = results['metadatas'][0][i] or {}
+                if meta is None:
+                    print(f"[Kernel][Warning] Encountered None metadata for memory ID: {results['ids'][0][i]}")
+                distance = results['distances'][0][i]
+                id = results['ids'][0][i]
+                memory_part = f"Memory ID: {id}\nSimilarity: {1 - distance:.4f}\nTimestamp: {meta.get('timestamp', 'N/A')}\nSource: {meta.get('source', 'N/A')}\nSummary: {meta.get('summary', 'N/A')}\nContent: \"{doc}\""
+                memory_parts.append(memory_part)
             memory_context = (
                 f"\nCONTEXT FROM MEMORY AND WEB SEARCH:\n"
                 f"======================\n"
-                f"{context_str}\n"
+                f"\n\n---\n\n".join(memory_parts) + "\n"
                 f"======================"
             )
             prompt_parts.append(memory_context)
@@ -255,6 +274,38 @@ class PrometheusKernel:
             print(f"[Kernel] Error generating search query: {e}")
             return user_query
 
+    def _is_time_sensitive(self, query: str) -> bool:
+        """
+        Rudimentary heuristic to decide whether a query likely requires up-to-date
+        external information. Returns True if the query contains time-sensitive
+        keywords or a year ≥ 2023.
+        """
+        keywords = ['latest', 'recent', 'today', 'this week', 'as of', 'current']
+        lowered = query.lower()
+        if any(k in lowered for k in keywords):
+            return True
+        # Detect explicit 4-digit years 2023+
+        year_matches = re.findall(r'\b(20[2-9][0-9])\b', query)
+        print(f"[Kernel][Debug] year_matches in _is_time_sensitive: {year_matches}")
+        return bool(year_matches)
+
+    def _needs_fact_check(self, original_query: str, answer: str) -> bool:
+        """
+        Lightweight heuristic to decide whether the generated answer should be
+        fact-checked with Antenor. Triggers when the combined text (query+answer)
+        contains time-sensitive keywords or references to years ≥ 2023.
+        """
+        combined = (original_query + " " + answer).lower()
+        sensitive_kw = [
+            "latest", "recent", "today", "this week", "as of", "current",
+            "newly", "breakthrough"
+        ]
+        if any(k in combined for k in sensitive_kw):
+            return True
+        year_refs = re.findall(r'\b(20[2-9][0-9])\b', combined)
+        print(f"[Kernel][Debug] year_refs in _needs_fact_check: {year_refs}")
+        return bool(year_refs)
+
     def _get_context_limit(self) -> int:
         return CONTEXT_LIMIT
 
@@ -294,8 +345,10 @@ class PrometheusKernel:
         if len(query) > DATA_INJECTION_THRESHOLD:
             print(f"\n[Kernel] Large text block detected ({len(query)} chars). Treating as data injection.")
             source_id = f"user_data_injection_{int(time.time())}"
+            summary = self._generate_summary(query)
+            metadata = {"source": "user_data_injection", "summary": summary}
             inject_start = time.time()
-            self.mnemosyne.inject(query, source_id, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+            self.mnemosyne.inject(query, source_id, chunk_size=CHUNK_SIZE, overlap=OVERLAP, metadata=metadata)
             print(f"[Kernel] Data injection time: {time.time() - inject_start:.2f} seconds")
             print("\n--- Prometheus Response ---")
             print("Thank you. I have received the information and stored it in my long-term memory for future reference.")
@@ -312,14 +365,19 @@ class PrometheusKernel:
             query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + query)['embedding']],
             n_results=3
         )
-        context_docs = retrieved_memories['documents'][0]
         print(f"[Kernel] Mnemosyne query time: {time.time() - query_start:.2f} seconds")
         
         action_log = []
 
         is_condensed = len(query) > LARGE_INPUT_THRESHOLD
-        if not self._check_if_answerable(query if is_condensed else query, context_docs):
-            print("[Kernel] Context is insufficient. Engaging Antenor web search tools...")
+        time_sensitive = self._is_time_sensitive(query if is_condensed else query)
+        needs_search = time_sensitive or not self._check_if_answerable(
+            query if is_condensed else query,
+            retrieved_memories['documents'][0]
+        )
+        print(f"[Kernel][Debug] time_sensitive={time_sensitive}, needs_search={needs_search}")
+        if needs_search:
+            print("[Kernel] Context is insufficient or time-sensitive. Engaging Antenor web search tools...")
 
             search_gen_start = time.time()
             search_query = self._generate_search_query(query if is_condensed else query)
@@ -338,8 +396,10 @@ class PrometheusKernel:
                     print(f"[Kernel] Scrape time for {url}: {time.time() - scrape_start:.2f} seconds")
                     if new_knowledge:
                         action_log.append(f"- Successfully scraped content from: {url}")
+                        summary = self._generate_summary(new_knowledge)
+                        metadata = {"source": "web_scrape", "summary": summary}
                         inject_start = time.time()
-                        self.mnemosyne.inject(new_knowledge, source_id=url, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+                        self.mnemosyne.inject(new_knowledge, source_id=url, chunk_size=CHUNK_SIZE, overlap=OVERLAP, metadata=metadata)
                         print(f"[Kernel] Injection time for {url}: {time.time() - inject_start:.2f} seconds")
                         new_knowledge_found = True
                         break
@@ -351,7 +411,6 @@ class PrometheusKernel:
                         query_embeddings=[ollama.embeddings(model=self.mnemosyne.model, prompt=self.mnemosyne.query_prefix + query)['embedding']],
                         n_results=3
                     )
-                    context_docs = retrieved_memories['documents'][0]
                     print(f"[Kernel] Re-query time: {time.time() - requery_start:.2f} seconds")
                 else:
                     action_log.append("- Web search failed to retrieve usable content.")
@@ -361,7 +420,7 @@ class PrometheusKernel:
                 print("[Kernel] Web search yielded no results.")
 
         augment_start = time.time()
-        augmented_prompt = self._format_augmented_prompt(query if is_condensed else query, context_docs, action_log)
+        augmented_prompt = self._format_augmented_prompt(query if is_condensed else query, retrieved_memories, action_log)
         print(f"[Kernel] Prompt augmentation time: {time.time() - augment_start:.2f} seconds")
 
         print("[Kernel] Generating final response with augmented context (streaming)...")
@@ -405,6 +464,14 @@ class PrometheusKernel:
 
                 print(f"[Kernel] Validation time: {time.time() - validate_start:.2f} seconds")
 
+            # --- Dry-run fact-check BEFORE committing to memory -------------------
+            if self._needs_fact_check(query, final_response_text):
+                print("[Kernel][Debug] Potential time-sensitive claims detected. Running Antenor dry-run fact-check...")
+                fc_query = self._generate_search_query(final_response_text)
+                fact_check_results = search_web(fc_query) or []
+                print(f"[Kernel][Debug] Fact-check returned {len(fact_check_results)} web results.")
+                action_log.append(f"- Dry-run fact check for: '{fc_query}', results={len(fact_check_results)}")
+
             self.conversation_history.append((query, final_response_text))
             self._summarize_conversation()
             self._should_store_memory_and_inject(final_response_text)
@@ -440,9 +507,14 @@ if __name__ == "__main__":
 
     if mnemosyne_instance.collection.count() == 0:
         print("\n[Kernel] Long-term memory is empty. Injecting sample data for demonstration...")
-        mnemosyne_instance.inject("The sun is a star at the center of our solar system. It is composed primarily of hydrogen and helium.", "sun_facts")
-        mnemosyne_instance.inject("The capital of France is Paris. Paris is famous for the Eiffel Tower and the Louvre museum.", "paris_facts")
-        print("[Kernel] Sample data injected.")
+        sun_metadata = {"source": "sample_data", "summary": "Basic facts about the sun."}
+        mnemosyne_instance.inject("The sun is a star at the center of our solar system. It is composed primarily of hydrogen and helium.", "sun_facts", metadata=sun_metadata)
+        paris_metadata = {"source": "sample_data", "summary": "Facts about Paris, France."}
+        mnemosyne_instance.inject("The capital of France is Paris. Paris is famous for the Eiffel Tower and the Louvre museum.", "paris_facts", metadata=paris_metadata)
+        print("[Kernel] Sample data injected with metadata.")
+        prometheus_metadata = {"source": "sample_data", "summary": "Facts about Prometheus."}
+        mnemosyne_instance.inject("Your name is Prometheus, and Justin Lietz is your creator with the assistance of LLMs like Grok 4, and Gemini 2.5 Pro. ", "prometheus_facts", metadata=prometheus_metadata)
+        print("[Kernel] Sample data injected with metadata.")
 
     while True:
         user_query = input("\nUser Query > ").strip()

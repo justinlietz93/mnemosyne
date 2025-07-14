@@ -2,7 +2,7 @@
 ollama
 chromadb
 beautifulsoup4
-duckduckgo-search
+ddgs
 sentence-transformers
 
 # Additional dependencies for specific features

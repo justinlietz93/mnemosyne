@@ -69,9 +69,9 @@ class Mnemosyne:
         
         return chunks
 
-    def inject(self, document: str, source_id: str, chunk_size: int = 5, overlap: int = 1):
+    def inject(self, document: str, source_id: str, chunk_size: int = 5, overlap: int = 1, metadata: dict = None):
         """
-        Injects a large document into memory by chunking it first with configurable parameters.
+        Injects a large document into memory by chunking it first with configurable parameters and optional metadata.
         """
         print(f"\n--- Injecting Document: {source_id} ---")
         chunks = self._chunk_text(document, chunk_size=chunk_size, overlap=overlap)
@@ -94,21 +94,35 @@ class Mnemosyne:
         except Exception as e:
             print(f"Error during bulk embedding generation: {e}")
             return
+
+        if metadata is None:
+            metadata = {}
+
+        # Add timestamp if not provided
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+
+        # Add source if not provided
+        if 'source' not in metadata:
+            metadata['source'] = source_id
+
+        metadatas = [metadata.copy() for _ in chunks]  # Same metadata for all chunks of this document
             
         self.collection.add(
             embeddings=embeddings,
             documents=chunks,
-            ids=chunk_ids
+            ids=chunk_ids,
+            metadatas=metadatas
         )
-        print(f"All chunks for document '{source_id}' injected successfully.")
+        print(f"All chunks for document '{source_id}' injected successfully with metadata.")
 
-    def retrieve(self, query: str, n_results: int = 3):
+    def retrieve(self, query: str, n_results: int = 3, filter: dict = None):
         """
-        Retrieves the most relevant memory chunks based on a query.
+        Retrieves the most relevant memory chunks based on a query, with optional metadata filter.
         """
         print(f"\n--- Retrieving Memories ---")
         print(f"Query: \"{query}\"")
-
+ 
         prefixed_query = self.query_prefix + query
 
         try:
@@ -119,7 +133,8 @@ class Mnemosyne:
 
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results
+            n_results=n_results,
+            where=filter
         )
 
         print("\nTop matching memories (chunks):")
@@ -131,8 +146,10 @@ class Mnemosyne:
             distance = results['distances'][0][i]
             similarity_score = 1 - distance
             chunk_id = results['ids'][0][i]
+            meta = results['metadatas'][0][i]
             print(f"  {i+1}. Chunk ID: {chunk_id}")
             print(f"      Similarity: {similarity_score:.4f}")
+            print(f"      Metadata: {meta}")
             print(f"      Content: \"{doc}\"")
 
 # --- Main Execution: Interactive CLI ---
