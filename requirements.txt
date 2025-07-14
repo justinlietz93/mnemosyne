@@ -1,10 +1,8 @@
 # Mnemosyne dependencies
-ollama
+ollama>=0.5.1
 chromadb
-beautifulsoup4
+beautifulsoup4>=4.13.0
 ddgs
-sentence-transformers
 
 # Additional dependencies for specific features
-chardet
- 
+requests
