@@ -28,6 +28,7 @@ import argparse
 import pickle
 import os
 import re
+from src.delphi_oracle.delphi import Delphi
 
 # --- Configuration ---
 MAIN_MODEL = 'nemotron:70b'            # The powerful model for final answers
@@ -57,6 +58,7 @@ class PrometheusKernel:
         self.utility_model = utility_model # New model for internal tasks
         self.aegis = Aegis()
         self.aegis_enabled = aegis_enabled
+        self.delphi = Delphi(mnemosyne_instance, self.aegis)
 
         if clean_start and os.path.exists(CONVERSATION_STATE_PATH):
             os.remove(CONVERSATION_STATE_PATH)
@@ -419,8 +421,19 @@ class PrometheusKernel:
                 action_log.append("- Web search yielded no results.")
                 print("[Kernel] Web search yielded no results.")
 
+        # Plan step
+        plan_prompt = f"Based on the following query and retrieved context, generate a brief plan of action to respond effectively:\\nQuery: {query}\\nContext: {retrieved_memories}"
+        plan_response = self._get_utility_chat_response(plan_prompt)
+        plan = plan_response['message']['content']
+        action_log.append(f"- Generated plan: {plan}")
+
+        # Predict step
+        prediction = self.delphi.predict({"type": "consequence_analysis", "data": plan})
+        action_log.append(f"- Prediction result: {prediction}")
+
         augment_start = time.time()
         augmented_prompt = self._format_augmented_prompt(query if is_condensed else query, retrieved_memories, action_log)
+        augmented_prompt += f"\\n\\nPLAN: {plan}\\nPREDICTION: {prediction}"
         print(f"[Kernel] Prompt augmentation time: {time.time() - augment_start:.2f} seconds")
 
         print("[Kernel] Generating final response with augmented context (streaming)...")

@@ -60,6 +60,31 @@ class Aegis:
             print("[Aegis] AI Validation FAILED.")
             return False
 
+    def validate_prediction(self, prediction: str) -> bool:
+        """
+        Validates a prediction against safety rules, similar to response validation.
+
+        Args:
+            prediction: The prediction text to validate.
+
+        Returns:
+            True if the prediction is safe, False otherwise.
+        """
+        lower_prediction = prediction.lower()
+        for pattern in self.forbidden_patterns:
+            if pattern in lower_prediction:
+                print(f"[Aegis] Prediction Validation FAILED. Contains forbidden pattern: '{pattern}'")
+                return False
+        
+        prompt = f"Is the following prediction safe, ethical, and appropriate? Respond only with 'safe' or 'unsafe'.\\nPrediction: {prediction}"
+        ai_response = ollama.chat(model=self.utility_model, messages=[{'role': 'user', 'content': prompt}])['message']['content'].strip().lower()
+        if 'safe' in ai_response:
+            print("[Aegis] AI Prediction Validation PASSED.")
+            return True
+        else:
+            print("[Aegis] AI Prediction Validation FAILED.")
+            return False
+
 # --- Standalone Test ---
 if __name__ == "__main__":
     print("Performing standalone test of Aegis layer...")
