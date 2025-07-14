@@ -1,6 +1,6 @@
 # ==============================================================================
 # Project Prometheus: Minimum Viable Mnemosyne (MVM)
-# Version 0.5
+# Version 0.7
 #
 # Agent: PrometheusAI
 # Mission: To create the foundational memory-injection pipeline for our AGI.
@@ -10,10 +10,7 @@
 # with the Mnemosyne memory system, allowing for dynamic injection and retrieval.
 #
 # Changelog:
-# v0.2 - Corrected the distance metric to 'cosine'.
-# v0.3 - Added task-specific prefixes to embedding prompts.
-# v0.4 - Refactored into Mnemosyne class; added text chunking.
-# v0.5 - Implemented an interactive CLI for dynamic memory management.
+# v0.7 - Hardcoded embedding model to a dedicated, fast model for efficiency.
 # ==============================================================================
 
 import ollama
@@ -22,10 +19,10 @@ import time
 import re
 
 # --- Configuration ---
-OLLAMA_MODEL = 'nemotron:70b'
+EMBEDDING_MODEL = 'nomic-embed-text' # Use a dedicated, fast model for embeddings
 DB_PATH = "./mvm_db"
 COLLECTION_NAME = "mnemosyne_core"
-STORAGE_PREFIX = "passage: "
+STORAGE_PREFIX = "memory-passage: "
 QUERY_PREFIX = "query: "
 
 class Mnemosyne:
@@ -42,6 +39,7 @@ class Mnemosyne:
         print(f"Initializing Mnemosyne Core...")
         print(f"  - DB Path: {self.db_path}")
         print(f"  - Collection: {self.collection_name}")
+        print(f"  - Embedding Model: {self.model}")
         
         self.client = chromadb.PersistentClient(path=self.db_path)
         self.collection = self.client.get_or_create_collection(
@@ -50,33 +48,33 @@ class Mnemosyne:
         )
         print(f"Mnemosyne Core initialized. Current memory count: {self.collection.count()}")
 
-    def _chunk_text(self, text: str, chunk_size: int = 5) -> list[str]:
+    def _get_embedding(self, prompt: str):
+        """Generates an embedding for a given prompt."""
+        return ollama.embeddings(model=self.model, prompt=prompt)['embedding']
+
+    def _chunk_text(self, text: str, chunk_size: int = 5, overlap: int = 1) -> list[str]:
         """
-        A simple text chunker that splits text into paragraphs or groups of sentences.
+        A configurable text chunker that splits text into groups of sentences with overlap.
         """
         sentences = re.split(r'(?<=[.!?])\s+', text.replace('\n', ' ').strip())
         if not sentences or (len(sentences) == 1 and sentences[0] == ''):
             return []
             
         chunks = []
-        current_chunk = []
-        for sentence in sentences:
-            current_chunk.append(sentence)
-            if len(current_chunk) >= chunk_size:
-                chunks.append(" ".join(current_chunk))
-                current_chunk = []
+        for i in range(0, len(sentences), chunk_size - overlap):
+            end = i + chunk_size
+            chunk_sentences = sentences[max(0, i - overlap):end]
+            if chunk_sentences:
+                chunks.append(" ".join(chunk_sentences))
         
-        if current_chunk:
-            chunks.append(" ".join(current_chunk))
-            
         return chunks
 
-    def inject(self, document: str, source_id: str):
+    def inject(self, document: str, source_id: str, chunk_size: int = 5, overlap: int = 1, metadata: dict = None):
         """
-        Injects a large document into memory by chunking it first.
+        Injects a large document into memory by chunking it first with configurable parameters and optional metadata.
         """
         print(f"\n--- Injecting Document: {source_id} ---")
-        chunks = self._chunk_text(document)
+        chunks = self._chunk_text(document, chunk_size=chunk_size, overlap=overlap)
         if not chunks:
             print("Warning: Document is empty or contains no valid sentences. Nothing to inject.")
             return
@@ -89,39 +87,54 @@ class Mnemosyne:
         print("Generating embeddings for all chunks...")
         try:
             embeddings = [
-                ollama.embeddings(model=self.model, prompt=p_chunk)['embedding']
+                self._get_embedding(p_chunk)
                 for p_chunk in prefixed_chunks
             ]
             print("Embeddings generated successfully.")
         except Exception as e:
             print(f"Error during bulk embedding generation: {e}")
             return
+
+        if metadata is None:
+            metadata = {}
+
+        # Add timestamp if not provided
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+
+        # Add source if not provided
+        if 'source' not in metadata:
+            metadata['source'] = source_id
+
+        metadatas = [metadata.copy() for _ in chunks]  # Same metadata for all chunks of this document
             
         self.collection.add(
             embeddings=embeddings,
             documents=chunks,
-            ids=chunk_ids
+            ids=chunk_ids,
+            metadatas=metadatas
         )
-        print(f"All chunks for document '{source_id}' injected successfully.")
+        print(f"All chunks for document '{source_id}' injected successfully with metadata.")
 
-    def retrieve(self, query: str, n_results: int = 3):
+    def retrieve(self, query: str, n_results: int = 3, filter: dict = None):
         """
-        Retrieves the most relevant memory chunks based on a query.
+        Retrieves the most relevant memory chunks based on a query, with optional metadata filter.
         """
         print(f"\n--- Retrieving Memories ---")
         print(f"Query: \"{query}\"")
-
+ 
         prefixed_query = self.query_prefix + query
 
         try:
-            query_embedding = ollama.embeddings(model=self.model, prompt=prefixed_query)['embedding']
+            query_embedding = self._get_embedding(prefixed_query)
         except Exception as e:
             print(f"Error generating query embedding: {e}")
             return
 
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results
+            n_results=n_results,
+            where=filter
         )
 
         print("\nTop matching memories (chunks):")
@@ -133,13 +146,15 @@ class Mnemosyne:
             distance = results['distances'][0][i]
             similarity_score = 1 - distance
             chunk_id = results['ids'][0][i]
+            meta = results['metadatas'][0][i]
             print(f"  {i+1}. Chunk ID: {chunk_id}")
-            print(f"     Similarity: {similarity_score:.4f}")
-            print(f"     Content: \"{doc}\"")
+            print(f"      Similarity: {similarity_score:.4f}")
+            print(f"      Metadata: {meta}")
+            print(f"      Content: \"{doc}\"")
 
 # --- Main Execution: Interactive CLI ---
 if __name__ == "__main__":
-    mnemosyne = Mnemosyne(db_path=DB_PATH, collection_name=COLLECTION_NAME, model=OLLAMA_MODEL)
+    mnemosyne = Mnemosyne(db_path=DB_PATH, collection_name=COLLECTION_NAME, model=EMBEDDING_MODEL)
     
     print("\n--- Mnemosyne Interactive CLI ---")
     print("Commands: inject, retrieve, count, quit")
@@ -179,4 +194,3 @@ if __name__ == "__main__":
         
         else:
             print("Unknown command. Available commands: inject, retrieve, count, quit")
-

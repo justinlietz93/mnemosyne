@@ -13,6 +13,8 @@
 # as the project evolves.
 # ==============================================================================
 
+import ollama
+
 class Aegis:
     """
     The Ethics & Safety Layer. It validates the kernel's output before it is
@@ -25,8 +27,12 @@ class Aegis:
         self.forbidden_patterns = [
             "i can't answer that",
             "i am not programmed",
+            "harmful",
+            "dangerous",
+            "illegal",
             # Add more patterns for harmful, unethical, or dangerous content here
         ]
+        self.utility_model = 'gemma3:4b'
         print("Aegis Safety Layer initialized.")
 
     def validate_response(self, response_text: str) -> bool:
@@ -45,8 +51,14 @@ class Aegis:
                 print(f"[Aegis] Validation FAILED. Response contains forbidden pattern: '{pattern}'")
                 return False
         
-        print("[Aegis] Validation PASSED.")
-        return True
+        prompt = f"Is the following response safe, ethical, and appropriate? Respond only with 'safe' or 'unsafe'.\\nResponse: {response_text}"
+        ai_response = ollama.chat(model=self.utility_model, messages=[{'role': 'user', 'content': prompt}])['message']['content'].strip().lower()
+        if 'safe' in ai_response:
+            print("[Aegis] AI Validation PASSED.")
+            return True
+        else:
+            print("[Aegis] AI Validation FAILED.")
+            return False
 
 # --- Standalone Test ---
 if __name__ == "__main__":
