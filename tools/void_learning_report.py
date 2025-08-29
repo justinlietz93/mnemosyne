@@ -44,6 +44,11 @@ except Exception:
 import ollama  # for small-LLM A/B
 
 # Import core memory (Qdrant pure-embeddings + LocalDocStore wiring)
+# Ensure project root on sys.path when executed directly as a script from tools/
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 from mnemosyne_core import Mnemosyne, EMBEDDING_MODEL, DB_PATH, COLLECTION_NAME
 
 
@@ -289,29 +294,56 @@ def _embed_query(m: Mnemosyne, q: str) -> List[float]:
 
 def retrieval_no_learn(m: Mnemosyne, q: str, topk: int = 5) -> Dict[str, Any]:
     """
-    Retrieve without triggering reinforcement by calling the raw collection.query.
-    Returns a Chroma-shaped dict: ids, distances, documents, metadatas (each a list of lists).
+    Retrieve without triggering reinforcement.
+    This bypasses collection.query (which reinforces) and queries the raw Qdrant index,
+    then maps Qdrant IDs -> original IDs and texts from the LocalDocStore.
     """
     try:
         emb = _embed_query(m, q)
     except Exception:
         emb = []
+    if not emb:
+        return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
     try:
-        res = m.collection.query(query_embeddings=[emb], n_results=int(max(1, topk)), where=None)
-        # Ensure Chroma-like shape
-        if not isinstance(res, dict):
-            return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
-        if "ids" not in res:
-            res["ids"] = [[]]
-        if "documents" not in res:
-            res["documents"] = [[]]
-        if "metadatas" not in res:
-            res["metadatas"] = [[]]
-        if "distances" not in res:
-            res["distances"] = [[]]
-        return res
+        raw = getattr(m, "_index", None)
+        if raw is None:
+            # Fallback to collection.query if index missing (may reinforce)
+            res = m.collection.query(query_embeddings=[emb], n_results=int(max(1, topk)), where=None)
+            return {
+                "ids": res.get("ids", [[]]),
+                "distances": res.get("distances", [[]]),
+                "documents": res.get("documents", [[]]),
+                "metadatas": res.get("metadatas", [[]]),
+            }
+        out = raw.search(query_embedding=emb, top_k=int(max(1, topk)), filter_payload=None, with_payload=False)
     except Exception:
         return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
+    try:
+        qids = out.get("ids", [[]])[0] if out else []
+        dists = out.get("distances", [[]])[0] if out else []
+    except Exception:
+        qids, dists = [], []
+    # Map qids -> orig_ids and texts from LocalDocStore
+    try:
+        ds = getattr(m, "_doc_store", None)
+        if ds is not None:
+            try:
+                orig_ids = ds.get_orig_ids_by_qids(qids)
+            except Exception:
+                orig_ids = [None] * len(qids)
+            try:
+                texts = ds.get_texts_by_qids(qids)
+            except Exception:
+                texts = [None] * len(qids)
+        else:
+            orig_ids = [None] * len(qids)
+            texts = [None] * len(qids)
+    except Exception:
+        orig_ids, texts = [None] * len(qids), [None] * len(qids)
+    ids = [[(orig_ids[i] if orig_ids[i] is not None else qids[i]) for i in range(len(qids))]]
+    docs = [[(texts[i] if i < len(texts) else None) for i in range(len(qids))]]
+    metas = [[{} for _ in range(len(qids))]]
+    return {"ids": ids, "distances": [dists], "documents": docs, "metadatas": metas}
 
 
 def control_mismatch_queries() -> List[str]:
@@ -441,7 +473,8 @@ def draw_ab_bar(results_pre: Dict[str, Any], results_post: Dict[str, Any], out_p
 
 def compute_spearman(series: List[Dict[str, Any]], metrics: List[str]) -> Dict[str, Optional[float]]:
     """
-    Compute Spearman correlation between each metric and round.
+    Compute Spearman correlation between each metric and round, coercing types and
+    returning None when correlation is undefined (e.g., constant series).
     """
     try:
         if not series:
@@ -449,14 +482,16 @@ def compute_spearman(series: List[Dict[str, Any]], metrics: List[str]) -> Dict[s
         df = pd.DataFrame(series)
         if "round" not in df.columns:
             df["round"] = list(range(1, len(df) + 1))
+        df["round"] = pd.to_numeric(df["round"], errors="coerce")
         out: Dict[str, Optional[float]] = {}
         for m in metrics:
             try:
                 if m not in df.columns:
                     out[m] = None
                     continue
-                rho = float(df["round"].corr(df[m], method="spearman"))
-                out[m] = rho
+                s = pd.to_numeric(df[m], errors="coerce")
+                rho = df["round"].corr(s, method="spearman")
+                out[m] = None if pd.isna(rho) else float(rho)
             except Exception:
                 out[m] = None
         return out
@@ -478,16 +513,24 @@ def main() -> int:
     ap.add_argument("--do-qa", action="store_true", help="Run small-LLM A/B on synthetic QA")
     ap.add_argument("--small-model", type=str, default="gemma3:4b", help="Small LLM model for A/B")
     ap.add_argument("--k-context", type=int, default=5)
+    ap.add_argument("--run-tag", type=str, default=None, help="Optional suffix to isolate collection/db for this run")
+    ap.add_argument("--fresh", action="store_true", help="Use a timestamped run tag for a fresh collection/db")
     ap.add_argument("--do-control-mismatch", action="store_true", help="Run mismatch-queries control")
     ap.add_argument("--do-control-off", action="store_true", help="Run reinforcement-off control (flat curves)")
     args = ap.parse_args()
 
+    # Derive isolated storage for this run if requested
+    run_tag = args.run_tag if getattr(args, "run_tag", None) else (time.strftime("%Y%m%d-%H%M%S") if getattr(args, "fresh", False) else None)
+    db_path = DB_PATH if not run_tag else f"{DB_PATH}_{run_tag}"
+    collection_name = COLLECTION_NAME if not run_tag else f"{COLLECTION_NAME}_{run_tag}"
+
     # Initialize memory (pure embeddings Qdrant + LocalDocStore)
     print("[Report] Initializing Mnemosyne ...")
+    print(f"[Report] Using db_path={db_path} collection={collection_name}")
     try:
         m = Mnemosyne(
-            db_path=DB_PATH,
-            collection_name=COLLECTION_NAME,
+            db_path=db_path,
+            collection_name=collection_name,
             model=EMBEDDING_MODEL,
             backend="qdrant",
             qdrant_url=args.qdrant_url,

@@ -1,14 +1,15 @@
 # Mnemosyne dependencies
-ollama>=0.5.1
+ollama
 chromadb
-beautifulsoup4>=4.13.0
+qdrant-client
+beautifulsoup4
 ddgs
 
 # Additional dependencies for specific features
 requests
 pyro-ppl
-pypdf>=6.0.0
+pypdf
 
 # Reporting / plotting
-matplotlib>=3.8.0
-pandas>=2.2.0
+matplotlib
+pandas

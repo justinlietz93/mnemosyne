@@ -3,13 +3,9 @@
 mvm_db
 .github/
 venv/
-.pyc
 __pycache__/
 plans/*
-.pkl
 output/*
-.pyc
-.roomodes
 ignore/*
 *.pkl
 *.pyc
