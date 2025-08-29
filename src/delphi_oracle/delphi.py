@@ -39,7 +39,7 @@ class Delphi:
         self.prediction_core = self.PredictionCore()
         self.model_repository = {}  # To store pre-trained models
         self.simulation_engine = self.SimulationEngine()
-        self.data_integrator = self.DataIntegrator()
+        self.data_integrator = self.DataIntegrator(self.mnemosyne, self.search_web, self.scrape_url)
         self.risk_assessor = self.RiskAssessor(aegis)
         self.query_handler = self.QueryHandler()
 
@@ -97,7 +97,9 @@ class Delphi:
             """
             Performs basic time-series forecasting using linear regression.
             """
+            print(f"Forecasting data: {data}")
             if not data or len(data) < 2:
+                print("Insufficient data for forecasting.")
                 raise ValueError("Insufficient data for forecasting.")
 
             X = [[i] for i in range(len(data))]
@@ -107,6 +109,7 @@ class Delphi:
             model.fit(X, y)
 
             next_value = model.predict([[len(data)]])[0]
+            print(f"Forecasted value: {next_value}")
             return {"forecast": next_value}
 
         def hypothesis_testing(self, hypothesis, data):
@@ -139,6 +142,11 @@ class Delphi:
             return results
 
     class DataIntegrator:
+        def __init__(self, mnemosyne, search_web, scrape_url):
+            self.mnemosyne = mnemosyne
+            self.search_web = search_web
+            self.scrape_url = scrape_url
+
         def fetch_and_merge(self, sources):
             """
             Fetches and merges data from Mnemosyne, Antenor, and synthetic sources.
@@ -186,7 +194,7 @@ class Delphi:
 # --- Standalone Test ---
 if __name__ == "__main__":
     # For testing purposes
-    mnemosyne = Mnemosyne(db_path="./mvm_db", collection_name="mnemosyne_core", model="nomic-embed-text")
+    mnemosyne = Mnemosyne(db_path="./mvm_db", collection_name="mnemosyne_core", model="mxbai-embed-large")
     aegis = Aegis()
     delphi = Delphi(mnemosyne, aegis)
     print("Delphi standalone test complete.")

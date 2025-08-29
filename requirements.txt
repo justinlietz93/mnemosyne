@@ -6,3 +6,4 @@ ddgs
 
 # Additional dependencies for specific features
 requests
+pyro-ppl

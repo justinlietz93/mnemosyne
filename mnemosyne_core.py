@@ -19,7 +19,7 @@ import time
 import re
 
 # --- Configuration ---
-EMBEDDING_MODEL = 'nomic-embed-text' # Use a dedicated, fast model for embeddings
+EMBEDDING_MODEL = 'mxbai-embed-large' # Use a dedicated, fast model for embeddings
 DB_PATH = "./mvm_db"
 COLLECTION_NAME = "mnemosyne_core"
 STORAGE_PREFIX = "memory-passage: "

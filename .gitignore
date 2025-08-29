@@ -11,3 +11,11 @@ plans/*
 .pkl
 output/*
 .pyc
+.roomodes
+ignore/*
+*.pkl
+*.pyc
+__pycache__/mnemosyne_core.cpython-311.pyc
+*.log
+.codeviz/*
+fum_core.xml

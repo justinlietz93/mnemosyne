@@ -61,9 +61,12 @@ class TestDelphi(unittest.TestCase):
             'sources': {},
             'data': [1, 2, 3]
         }
-        self.delphi.risk_assessor.validate_prediction.return_value = True
-        result = self.delphi.predict(request)
-        self.assertIn("forecast", result)
+        with patch('src.delphi_oracle.delphi.Delphi.RiskAssessor.validate_prediction') as mock_validate:
+            mock_validate.return_value = True
+            with patch.object(self.delphi.data_integrator, 'fetch_and_merge') as mock_fetch:
+                mock_fetch.return_value = [1, 2, 3, 4]
+                result = self.delphi.predict(request)
+                self.assertIn("forecast", result)
 
 if __name__ == '__main__':
     unittest.main()

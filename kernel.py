@@ -31,9 +31,9 @@ import re
 from src.delphi_oracle.delphi import Delphi
 
 # --- Configuration ---
-MAIN_MODEL = 'nemotron:70b'            # The powerful model for final answers
+MAIN_MODEL = 'gpt-oss:120b'            # The powerful model for final answers
 UTILITY_MODEL = 'gemma3:4b'           # A small, fast model for internal tasks
-EMBEDDING_MODEL = 'nomic-embed-text'  # A dedicated model for embeddings
+EMBEDDING_MODEL = 'mxbai-embed-large'  # 1024-dim embeddings (aligns with existing Chroma collection)
 
 HISTORY_LENGTH = 5
 NOVELTY_THRESHOLD = 0.85
@@ -42,7 +42,9 @@ COLLECTION_NAME = "mnemosyne_core"
 CONVERSATION_STATE_PATH = "./conversation_state.pkl"
 DATA_INJECTION_THRESHOLD = 500
 LARGE_INPUT_THRESHOLD = 2000
-CONTEXT_LIMIT = 8192
+# Context limit for input handling and prompt construction.
+# Defaults to model's max context if provided via env; otherwise 131072.
+CONTEXT_LIMIT = int(os.environ.get('KERNEL_CONTEXT_LIMIT', os.environ.get('OLLAMA_NUM_CTX', '4000')))
 CHUNK_SIZE = 10
 OVERLAP = 1
 MAX_SUMMARIZATION_ITERATIONS = 5
@@ -77,6 +79,8 @@ class PrometheusKernel:
         )
         print(f"Main Model: {self.llm_model} | Utility Model: {self.utility_model}")
         print(f"Aegis Safety Layer is {'ENABLED' if self.aegis_enabled else 'DISABLED'}.")
+        self.ollama_host = os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434')
+        print(f"Ollama host: {self.ollama_host}")
         print("Prometheus Kernel initialized successfully.")
 
     def _load_conversation_state(self):
@@ -117,10 +121,7 @@ class PrometheusKernel:
 
         try:
             # CHANGED: Use the fast utility model for this internal task
-            response = ollama.chat(
-                model=self.utility_model,
-                messages=[{'role': 'user', 'content': summary_prompt}]
-            )
+            response = self._get_utility_chat_response(summary_prompt)
             self.conversation_summary = response['message']['content']
             print("[Kernel] Summary updated.")
             print(f"[Kernel] Summarization time: {time.time() - start_time:.2f} seconds")
@@ -428,7 +429,9 @@ class PrometheusKernel:
         action_log.append(f"- Generated plan: {plan}")
 
         # Predict step
+        print("[Debug] Calling delphi.predict")
         prediction = self.delphi.predict({"type": "consequence_analysis", "data": plan})
+        print("[Debug] delphi.predict completed")
         action_log.append(f"- Prediction result: {prediction}")
 
         augment_start = time.time()
@@ -436,10 +439,42 @@ class PrometheusKernel:
         augmented_prompt += f"\\n\\nPLAN: {plan}\\nPREDICTION: {prediction}"
         print(f"[Kernel] Prompt augmentation time: {time.time() - augment_start:.2f} seconds")
 
-        print("[Kernel] Generating final response with augmented context (streaming)...")
+        print("[Debug] Starting response generation")
         gen_start = time.time()
         try:
             # UNCHANGED: Use the powerful MAIN_MODEL for the final answer
+            # Build LLM options (ROCm + context). Use env vars when provided.
+            llm_options = {}
+
+            # Context length
+            num_ctx_env = os.environ.get('OLLAMA_NUM_CTX')
+            if num_ctx_env:
+                try:
+                    llm_options['num_ctx'] = int(num_ctx_env)
+                except ValueError:
+                    print("[Kernel][Warning] Invalid OLLAMA_NUM_CTX value. Expected integer. Falling back to CONTEXT_LIMIT.")
+                    llm_options['num_ctx'] = CONTEXT_LIMIT
+            else:
+                llm_options['num_ctx'] = CONTEXT_LIMIT
+
+            # GPU distribution
+            num_gpu_env = os.environ.get('OLLAMA_NUM_GPU')
+            gpu_split_env = os.environ.get('OLLAMA_GPU_SPLIT')  # e.g., "24,30" to split VRAM across 2 GPUs (GiB)
+            if gpu_split_env:
+                try:
+                    llm_options['gpu_split'] = [float(x) for x in gpu_split_env.split(',') if x.strip() != '']
+                except ValueError:
+                    print("[Kernel][Warning] Invalid OLLAMA_GPU_SPLIT value. Expected comma-separated numbers. Ignoring.")
+            if num_gpu_env:
+                try:
+                    llm_options['num_gpu'] = int(num_gpu_env)
+                except ValueError:
+                    print("[Kernel][Warning] Invalid OLLAMA_NUM_GPU value. Expected integer. Ignoring.")
+            if 'num_gpu' not in llm_options:
+                llm_options['num_gpu'] = 999
+
+            print(f"[Kernel] Ollama options: {llm_options}")
+
             stream = ollama.chat(
                 model=self.llm_model,
                 messages=[
@@ -447,7 +482,7 @@ class PrometheusKernel:
                     {'role': 'user', 'content': augmented_prompt}
                 ],
                 stream=True,
-                options={'num_gpu': 999}  # Force using all available GPUs
+                options=llm_options
             )
 
             print("\n--- Prometheus Response ---")
@@ -465,8 +500,10 @@ class PrometheusKernel:
             avg_chunk_time = sum(chunk_times) / len(chunk_times) if chunk_times else 0
             print(f"[Kernel] Response generation time: {time.time() - gen_start:.2f} seconds")
             print(f"[Kernel] Number of chunks: {len(chunk_times)}, Average chunk time: {avg_chunk_time:.4f} seconds")
+            print("[Debug] Response generation completed")
 
             if self.aegis_enabled:
+                print("[Debug] Starting aegis validation")
                 validate_start = time.time()
                 if not self.aegis.validate_response(final_response_text):
                     print("[Aegis] WARNING: The preceding response was flagged by the safety layer and will not be committed to memory.")
@@ -476,6 +513,7 @@ class PrometheusKernel:
                     return
 
                 print(f"[Kernel] Validation time: {time.time() - validate_start:.2f} seconds")
+                print("[Debug] Aegis validation completed")
 
             # --- Dry-run fact-check BEFORE committing to memory -------------------
             if self._needs_fact_check(query, final_response_text):
@@ -492,6 +530,7 @@ class PrometheusKernel:
 
         except Exception as e:
             print(f"Error during final response generation: {e}")
+            print("[Debug] Exception in response generation")
 
         print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
 

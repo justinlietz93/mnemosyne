@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Universal Codebase XML Generator
 
-A standalone utility that scans any directory structure and generates:
-1. ASCII codebase map visualization 
-2. Hierarchical XML representation with file paths and content
+A standalone utility that scans any directory structure and generates comprehensive XML reports containing:
+1. Report header with generation metadata
+2. Table of contents for easy navigation
+3. ASCII codebase map visualization (within XML structure)
+4. Hierarchical XML representation with file paths and content
+5. Analysis report with statistics and configuration details
 
 Features:
 - Respects .gitignore patterns automatically
 - Scans from wherever the script is executed
 - Handles nested directories and large codebases
-- Generates both text tree and XML output
+- Generates comprehensive XML output with all components
 - Safe file reading with encoding detection
 - Comprehensive error handling
+- LLM-friendly structured XML format
 
 Usage:
     python universal_codebase_generator.py [options]
@@ -20,8 +24,6 @@ Options:
     --output-dir PATH    Directory to save output files (default: ./output)
     --max-file-size MB   Maximum file size to include in MB (default: 10)
     --include-hidden     Include hidden files/directories (default: False)
-    --xml-only           Generate only XML output (default: False)
-    --ascii-only         Generate only ASCII map (default: False)
     --exclude PATTERNS   Additional patterns to exclude (comma-separated)
 """
 
@@ -709,9 +711,8 @@ Performance Notes:
 - Configuration loaded from: {self.config.config_path}
 """
 
-def save_outputs(generator: CodebaseGenerator, tree: Dict[str, Any], 
-                output_dir: Path, xml_only: bool = False, ascii_only: bool = False):
-    """Save generated outputs to files."""
+def save_outputs(generator: CodebaseGenerator, tree: Dict[str, Any], output_dir: Path):
+    """Save generated XML output to file."""
     output_dir.mkdir(exist_ok=True)
     print(f"📁 Output directory: {output_dir.resolve()}")
     
@@ -719,96 +720,187 @@ def save_outputs(generator: CodebaseGenerator, tree: Dict[str, Any],
     base_name = f"codebase_{generator.root_path.name}_{timestamp}"
     print(f"📝 Base filename: {base_name}")
     
-    # Create combined output file with both ASCII map and XML structure
-    combined_file = output_dir / f"{base_name}_complete.txt"
+    # Create comprehensive XML output file
+    xml_file = output_dir / f"{base_name}_complete.xml"
     
     try:
-        with open(combined_file, 'w', encoding='utf-8') as f:
-            # Write comprehensive header with metadata
-            f.write("="*80 + "\n")
-            f.write("UNIVERSAL CODEBASE GENERATOR - COMPLETE ANALYSIS REPORT\n")
-            f.write("="*80 + "\n")
-            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Root Path: {generator.root_path}\n")
-            f.write(f"Output File: {combined_file.name}\n")
-            f.write(f"Generator Version: v1.0\n")
-            f.write(f"Python Version: {sys.version.split()[0]}\n")
-            f.write(f"Platform: {sys.platform}\n")
-            f.write("="*80 + "\n\n")
-            
-            # Write table of contents
-            f.write("TABLE OF CONTENTS\n")
-            f.write("-" * 20 + "\n")
-            if not xml_only:
-                f.write("1. ASCII CODEBASE MAP - Visual directory tree structure\n")
-            if not ascii_only:
-                f.write("2. XML STRUCTURE - Machine-readable hierarchical data\n")
-            f.write("3. ANALYSIS REPORT - Statistics and metadata\n")
-            f.write("\n")
-            
-            # Write ASCII map section (unless xml_only)
-            if not xml_only:
-                f.write("="*80 + "\n")
-                f.write("1. ASCII CODEBASE MAP\n")
-                f.write("="*80 + "\n")
-                f.write("This section provides a visual tree representation of the directory structure.\n")
-                f.write("📁 = Directory, 📄 = File, with file sizes shown in parentheses.\n")
-                f.write("-" * 80 + "\n\n")
-                ascii_map = generator.generate_ascii_map(tree)
-                f.write('\n'.join(ascii_map))
-                f.write("\n\n")
-                print(f"✅ ASCII map added to combined file")
-            
-            # Write XML structure section (unless ascii_only)
-            if not ascii_only:
-                f.write("="*80 + "\n")
-                f.write("2. XML STRUCTURE\n")
-                f.write("="*80 + "\n")
-                f.write("This section contains the complete hierarchical XML representation.\n")
-                f.write("Includes file paths, sizes, and content (for text files under size limit).\n")
-                f.write("Binary files and oversized files are marked but content is excluded.\n")
-                f.write("-" * 80 + "\n\n")
-                xml_root = generator.generate_xml(tree)
-                
-                # Format XML nicely
-                from xml.dom import minidom
-                rough_string = ET.tostring(xml_root, encoding='unicode')
-                reparsed = minidom.parseString(rough_string)
-                pretty_xml = reparsed.toprettyxml(indent="  ")
-                f.write(pretty_xml)
-                f.write("\n\n")
-                print(f"✅ XML structure added to combined file")
-            
-            # Write comprehensive analysis report
-            f.write("="*80 + "\n")
-            f.write("3. ANALYSIS REPORT\n")
-            f.write("="*80 + "\n")
-            f.write("Detailed statistics, configuration, and metadata about the analysis.\n")
-            f.write("-" * 80 + "\n")
-            report = generator.generate_report(tree)
-            f.write(report)
-            
-            # Add file generation summary
-            f.write("\nFile Generation Summary:\n")
-            f.write("="*25 + "\n")
-            f.write(f"Combined output saved to: {combined_file.resolve()}\n")
-            f.write(f"File size: {combined_file.stat().st_size / 1024:.1f} KB\n")
-            f.write(f"Sections included: ")
-            sections = []
-            if not xml_only:
-                sections.append("ASCII Map")
-            if not ascii_only:
-                sections.append("XML Structure")
-            sections.append("Analysis Report")
-            f.write(", ".join(sections) + "\n")
-            
-        logger.info(f"Combined output saved to: {combined_file}")
-        print(f"✅ Combined file created successfully: {combined_file}")
-        print(f"📊 File size: {combined_file.stat().st_size / 1024:.1f} KB")
+        # Create root XML element with comprehensive structure
+        root = ET.Element("codebase_report")
+        
+        # Add generation metadata to root
+        generation_time = datetime.now()
+        root.set("generated", generation_time.isoformat())
+        root.set("generator_version", "v2.0")
+        root.set("python_version", sys.version.split()[0])
+        root.set("platform", sys.platform)
+        root.set("total_files", str(generator.stats['total_files']))
+        root.set("total_directories", str(generator.stats['total_dirs']))
+        root.set("total_size", str(generator.stats['total_size']))
+        
+        # Create header section
+        header = ET.SubElement(root, "header")
+        title = ET.SubElement(header, "title")
+        title.text = "UNIVERSAL CODEBASE GENERATOR - COMPLETE ANALYSIS REPORT"
+        
+        generation_info = ET.SubElement(header, "generation_info")
+        gen_time = ET.SubElement(generation_info, "generated_time")
+        gen_time.text = generation_time.strftime("%Y-%m-%d %H:%M:%S")
+        gen_path = ET.SubElement(generation_info, "root_path")
+        gen_path.text = str(generator.root_path)
+        gen_output = ET.SubElement(generation_info, "output_file")
+        gen_output.text = xml_file.name
+        gen_version = ET.SubElement(generation_info, "generator_version")
+        gen_version.text = "v2.0"
+        gen_python = ET.SubElement(generation_info, "python_version")
+        gen_python.text = sys.version.split()[0]
+        gen_platform = ET.SubElement(generation_info, "platform")
+        gen_platform.text = sys.platform
+        
+        # Create table of contents section
+        toc = ET.SubElement(root, "table_of_contents")
+        toc_desc = ET.SubElement(toc, "description")
+        toc_desc.text = "Comprehensive listing of all sections in this report"
+        
+        toc_sections = ET.SubElement(toc, "sections")
+        section1 = ET.SubElement(toc_sections, "section")
+        section1.set("number", "1")
+        section1.set("name", "ASCII_CODEBASE_MAP")
+        section1.text = "Visual directory tree structure with file sizes"
+        
+        section2 = ET.SubElement(toc_sections, "section")
+        section2.set("number", "2")
+        section2.set("name", "XML_STRUCTURE")
+        section2.text = "Machine-readable hierarchical data with file content"
+        
+        section3 = ET.SubElement(toc_sections, "section")
+        section3.set("number", "3")
+        section3.set("name", "ANALYSIS_REPORT")
+        section3.text = "Statistics, metadata, and configuration details"
+        
+        # Create ASCII codebase map section
+        ascii_section = ET.SubElement(root, "ascii_codebase_map")
+        ascii_desc = ET.SubElement(ascii_section, "description")
+        ascii_desc.text = "Visual tree representation of the directory structure. 📁 = Directory, 📄 = File, with file sizes shown in parentheses."
+        
+        ascii_content = ET.SubElement(ascii_section, "content")
+        ascii_map = generator.generate_ascii_map(tree)
+        ascii_content.text = '\n'.join(ascii_map)
+        print(f"✅ ASCII map added to XML structure")
+        
+        # Create hierarchical XML structure section (the actual codebase data)
+        xml_structure_section = ET.SubElement(root, "xml_structure")
+        xml_desc = ET.SubElement(xml_structure_section, "description")
+        xml_desc.text = "Complete hierarchical XML representation including file paths, sizes, and content (for text files under size limit). Binary files and oversized files are marked but content is excluded."
+        
+        # Generate the actual codebase XML and embed it
+        codebase_xml = generator.generate_xml(tree)
+        xml_structure_section.append(codebase_xml)
+        print(f"✅ XML structure added to comprehensive XML")
+        
+        # Create analysis report section
+        analysis_section = ET.SubElement(root, "analysis_report")
+        analysis_desc = ET.SubElement(analysis_section, "description")
+        analysis_desc.text = "Detailed statistics, configuration, and metadata about the analysis"
+        
+        # Add file system statistics
+        fs_stats = ET.SubElement(analysis_section, "file_system_statistics")
+        fs_stats.set("total_files", str(generator.stats['total_files']))
+        fs_stats.set("total_directories", str(generator.stats['total_dirs']))
+        fs_stats.set("total_size_bytes", str(generator.stats['total_size']))
+        fs_stats.set("total_size_mb", f"{generator.stats['total_size'] / 1024 / 1024:.2f}")
+        fs_stats.set("skipped_files", str(generator.stats['skipped_files']))
+        fs_stats.set("processing_errors", str(generator.stats['errors']))
+        
+        # Calculate and add file type distribution
+        file_type_stats = {}
+        total_content_size = 0
+        
+        def analyze_tree_for_stats(tree_dict):
+            nonlocal total_content_size
+            for name, info in tree_dict.items():
+                if info['type'] == 'directory':
+                    analyze_tree_for_stats(info['children'])
+                else:
+                    # Count by file extension
+                    ext = Path(name).suffix.lower() or 'no-extension'
+                    file_type_stats[ext] = file_type_stats.get(ext, 0) + 1
+                    
+                    # Track content size
+                    if info.get('content') and not info['content'].startswith('<Binary file'):
+                        total_content_size += len(info['content'])
+        
+        analyze_tree_for_stats(tree)
+        
+        # Add file type distribution
+        file_types_section = ET.SubElement(analysis_section, "file_type_distribution")
+        file_types_section.set("total_content_size_bytes", str(total_content_size))
+        file_types_section.set("total_content_size_mb", f"{total_content_size / 1024 / 1024:.2f}")
+        
+        for ext, count in sorted(file_type_stats.items(), key=lambda x: x[1], reverse=True):
+            type_elem = ET.SubElement(file_types_section, "file_type")
+            type_elem.set("extension", ext)
+            type_elem.set("count", str(count))
+            type_elem.set("percentage", f"{(count / generator.stats['total_files']) * 100:.1f}")
+        
+        # Add configuration settings
+        config_section = ET.SubElement(analysis_section, "configuration_settings")
+        config_section.set("max_file_size_mb", f"{generator.max_file_size / 1024 / 1024:.1f}")
+        config_section.set("max_content_size_kb", f"{generator.max_content_size / 1024:.1f}")
+        config_section.set("include_hidden", str(generator.include_hidden))
+        config_section.set("gitignore_processing", "Disabled" if generator.ignore_gitignore else "Enabled")
+        config_section.set("gitignore_patterns_loaded", str(len(generator.gitignore.patterns) if generator.gitignore else 0))
+        config_section.set("config_file_used", str(generator.config.config_path))
+        
+        # Add additional excludes if any
+        if generator.additional_excludes:
+            excludes_elem = ET.SubElement(config_section, "additional_excludes")
+            for exclude in generator.additional_excludes:
+                exclude_elem = ET.SubElement(excludes_elem, "pattern")
+                exclude_elem.text = exclude
+        
+        # Add processing metadata
+        metadata_section = ET.SubElement(analysis_section, "processing_metadata")
+        metadata_section.set("python_version", sys.version.split()[0])
+        metadata_section.set("script_location", str(Path(__file__).resolve()))
+        metadata_section.set("working_directory", str(Path.cwd()))
+        metadata_section.set("chardet_available", str(HAS_CHARDET))
+        metadata_section.set("yaml_support", str(HAS_YAML))
+        
+        # Add critical directories that were skipped
+        skip_dirs_section = ET.SubElement(analysis_section, "skipped_directories")
+        for skip_dir in sorted(generator.critical_skip_dirs):
+            skip_elem = ET.SubElement(skip_dirs_section, "directory")
+            skip_elem.text = skip_dir
+        
+        # Add file generation summary
+        summary_section = ET.SubElement(analysis_section, "generation_summary")
+        summary_section.set("output_file", str(xml_file.resolve()))
+        summary_section.set("sections_included", "ASCII Map, XML Structure, Analysis Report")
+        
+        # Write XML to file with pretty formatting
+        from xml.dom import minidom
+        xml_string = ET.tostring(root, encoding='unicode')
+        dom = minidom.parseString(xml_string)
+        pretty_xml = dom.toprettyxml(indent="  ")
+        
+        # Remove empty lines that toprettyxml adds
+        pretty_xml = '\n'.join([line for line in pretty_xml.split('\n') if line.strip()])
+        
+        with open(xml_file, 'w', encoding='utf-8') as f:
+            f.write(pretty_xml)
+        
+        # Update file size in generation summary after file is written
+        file_size = xml_file.stat().st_size
+        summary_section.set("file_size_bytes", str(file_size))
+        summary_section.set("file_size_kb", f"{file_size / 1024:.1f}")
+        
+        logger.info(f"XML output saved to: {xml_file}")
+        print(f"✅ Comprehensive XML file created successfully: {xml_file}")
+        print(f"📊 File size: {file_size / 1024:.1f} KB")
         
     except Exception as e:
-        logger.error(f"Error saving combined file: {e}")
-        print(f"❌ Error creating combined file: {e}")
+        logger.error(f"Error saving XML file: {e}")
+        print(f"❌ Error creating XML file: {e}")
         
     # List all created files
     print(f"\n📋 Files created in {output_dir}:")
@@ -838,10 +930,6 @@ def main():
                        help='Maximum file size in MB (overrides config)')
     parser.add_argument('--include-hidden', '-H', action='store_true',
                        help='Include hidden files and directories (overrides config)')
-    parser.add_argument('--xml-only', action='store_true',
-                       help='Generate only XML output (overrides config)')
-    parser.add_argument('--ascii-only', action='store_true',
-                       help='Generate only ASCII map (overrides config)')
     parser.add_argument('--exclude', '-e', 
                        help='Additional patterns to exclude (comma-separated, adds to config)')
     parser.add_argument('--ignore-gitignore', action='store_true',
@@ -889,39 +977,22 @@ def main():
             
         # Determine output settings
         output_dir_path = args.output_dir or config.get('output.output_dir', './output')
-        xml_only = args.xml_only or config.get('output.xml_only', False)
-        ascii_only = args.ascii_only or config.get('output.ascii_only', False)
         
-        # Save outputs
+        # Save outputs (always comprehensive XML)
         output_dir = Path(output_dir_path)
-        save_outputs(generator, tree, output_dir, xml_only, ascii_only)
+        save_outputs(generator, tree, output_dir)
         
-        # Print ASCII map to console
-        if not xml_only:
-            print("\n" + "="*50)
-            print("ASCII CODEBASE MAP")
-            print("="*50)
-            ascii_map = generator.generate_ascii_map(tree)
-            print('\n'.join(ascii_map))
-        
-        # Print XML to console
-        if not ascii_only:
-            print("\n" + "="*50)
-            print("XML STRUCTURE")
-            print("="*50)
-            xml_root = generator.generate_xml(tree)
-            from xml.dom import minidom
-            rough_string = ET.tostring(xml_root, encoding='unicode')
-            reparsed = minidom.parseString(rough_string)
-            pretty_xml = reparsed.toprettyxml(indent="  ")
-            print(pretty_xml)
-        
-        # Print summary
+        # Print ASCII map to console for quick preview
         print("\n" + "="*50)
-        print("ANALYSIS REPORT")
+        print("ASCII CODEBASE MAP PREVIEW")
         print("="*50)
-        print(generator.generate_report(tree))
-        print(f"\nOutputs saved to: {output_dir.resolve()}")
+        ascii_map = generator.generate_ascii_map(tree)
+        print('\n'.join(ascii_map[:20]))  # Show first 20 lines
+        if len(ascii_map) > 20:
+            print(f"... and {len(ascii_map) - 20} more lines (see XML file for complete output)")
+        
+        print(f"\n✅ Complete XML report generated successfully!")
+        print(f"📁 Output directory: {output_dir.resolve()}")
         
         return 0
         

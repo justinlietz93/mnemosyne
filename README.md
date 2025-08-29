@@ -14,7 +14,7 @@ Project Prometheus aims to build the Fully Unified Model (FUM) by expanding Prom
 
 1. Clone the repository.
 2. Install dependencies: `pip install -r requirements.txt`.
-3. Ensure Ollama is installed and models are pulled (e.g., nemotron:70b, gemma3:4b, nomic-embed-text).
+3. Ensure Ollama is installed and models are pulled (e.g., gpt-oss:120b, gemma3:4b, nomic-embed-text).
 
 ## Usage
 
@@ -35,7 +35,7 @@ from src.delphi_oracle.delphi import Delphi
 from mnemosyne_core import Mnemosyne
 from aegis_layer import Aegis
 
-mnemosyne = Mnemosyne(db_path="./mvm_db", collection_name="mnemosyne_core", model="nomic-embed-text")
+mnemosyne = Mnemosyne(db_path="./mvm_db", collection_name="mnemosyne_core", model="nmxbai-embed-large")
 aegis = Aegis()
 delphi = Delphi(mnemosyne, aegis)
 
