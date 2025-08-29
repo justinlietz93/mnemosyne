@@ -7,3 +7,8 @@ ddgs
 # Additional dependencies for specific features
 requests
 pyro-ppl
+pypdf>=6.0.0
+
+# Reporting / plotting
+matplotlib>=3.8.0
+pandas>=2.2.0

@@ -21,17 +21,25 @@
 import ollama
 from mnemosyne_core import Mnemosyne
 from aegis_layer import Aegis
-from antenor_tools import search_web, scrape_url
+# Conditional import of web tools to allow disabling for memory-only mode
+try:  # pragma: no cover - defensive import
+    from antenor_tools import search_web, scrape_url  # type: ignore
+except Exception:  # pragma: no cover
+    search_web = None  # type: ignore
+    scrape_url = None  # type: ignore
 from collections import deque
 import time
 import argparse
 import pickle
 import os
 import re
-from src.delphi_oracle.delphi import Delphi
+try:  # pragma: no cover - defensive import
+    from src.delphi_oracle.delphi import Delphi  # type: ignore
+except Exception:  # pragma: no cover
+    Delphi = None  # type: ignore
 
 # --- Configuration ---
-MAIN_MODEL = 'gpt-oss:120b'            # The powerful model for final answers
+MAIN_MODEL = 'qwen3:32b'            # The powerful model for final answers
 UTILITY_MODEL = 'gemma3:4b'           # A small, fast model for internal tasks
 EMBEDDING_MODEL = 'mxbai-embed-large'  # 1024-dim embeddings (aligns with existing Chroma collection)
 
@@ -48,19 +56,35 @@ CONTEXT_LIMIT = int(os.environ.get('KERNEL_CONTEXT_LIMIT', os.environ.get('OLLAM
 CHUNK_SIZE = 10
 OVERLAP = 1
 MAX_SUMMARIZATION_ITERATIONS = 5
+VOID_STATE_DEFAULT_PATH = "./void_memory_state.json"
 
 class PrometheusKernel:
     """
     The core reasoning agent. It orchestrates memory and language models.
     """
-    def __init__(self, mnemosyne_instance: Mnemosyne, llm_model: str, utility_model: str, aegis_enabled: bool = True, clean_start: bool = False):
+    def __init__(self, mnemosyne_instance: Mnemosyne, llm_model: str, utility_model: str,
+                 aegis_enabled: bool = True, clean_start: bool = False,
+                 enable_search: bool = True, enable_delphi: bool = True,
+                 void_state_path: str | None = None,
+                 void_autosave: bool = True):
         print("Initializing Prometheus Kernel...")
         self.mnemosyne = mnemosyne_instance
         self.llm_model = llm_model
         self.utility_model = utility_model # New model for internal tasks
         self.aegis = Aegis()
         self.aegis_enabled = aegis_enabled
-        self.delphi = Delphi(mnemosyne_instance, self.aegis)
+        self._void_state_path = void_state_path or VOID_STATE_DEFAULT_PATH
+        self._void_autosave = void_autosave
+        # Feature flags
+        self.search_enabled = bool(enable_search and callable(globals().get('search_web', None)))
+        self.delphi_enabled = bool(enable_delphi and callable(globals().get('Delphi', None)))
+        self.delphi = None
+        if self.delphi_enabled:
+            try:
+                self.delphi = Delphi(mnemosyne_instance, self.aegis)  # type: ignore
+            except Exception as e:  # pragma: no cover
+                print(f"[Kernel] Warning: Failed to initialize Delphi; disabling. Error: {e}")
+                self.delphi_enabled = False
 
         if clean_start and os.path.exists(CONVERSATION_STATE_PATH):
             os.remove(CONVERSATION_STATE_PATH)
@@ -68,17 +92,35 @@ class PrometheusKernel:
 
         self._load_conversation_state()
 
-        self.system_prompt = (
-            "You are Prometheus, a helpful AI assistant with a vast internal knowledge base, a long-term memory, and the ability to browse the web. "
-            "You will be given a user's query and context from your memory, conversation history, and a list of actions you just performed. "
-            "Treat these memories as a human would, casually recalling them to inform your response without needing to explicitly mention them out loud. "
-            "Your task is to synthesize all of this information to answer the user's query accurately and naturally. "
-            "If a retrieved memory is completely irrelevant, you're allowed to just ignore it. "
-            "CRITICAL INSTRUCTION: If your 'ACTIONS I JUST TOOK' list shows you performed a web search, you MUST acknowledge this action and base your response on the new information you found. Do NOT state that you do not have internet access or that your knowledge is cut off if you have just successfully used a web tool. "
-            "Finally, and very importantly, DO NOT mention your memories UNLESS it's useful context to add AND you phrase it as \"I remember\" or \"I'm reminded that\", OR the user specifically asks."
-        )
+        # Attempt to load void memory state (after conversation since independent)
+        if self._void_state_path and self._void_autosave and not clean_start:
+            try:
+                if os.path.exists(self._void_state_path):
+                    if self.mnemosyne.load_void_state(self._void_state_path):
+                        print(f"[Kernel][VoidMemory] Loaded lifecycle state from {self._void_state_path}")
+                    else:
+                        print(f"[Kernel][VoidMemory] Found file but failed to load: {self._void_state_path}")
+            except Exception as e:  # pragma: no cover
+                print(f"[Kernel][VoidMemory] Load error: {e}")
+
+        # Dynamic system prompt reflecting enabled capabilities
+        prompt_parts = [
+            "You are Prometheus, a helpful AI assistant with a long-term vector memory (Mnemosyne).",
+            "You receive user queries plus retrieved memory context and recent conversation history.",
+            "Treat memories like human recollections; only cite them explicitly if it adds value (e.g., 'I remember ...')."
+        ]
+        if self.search_enabled:
+            prompt_parts.append(
+                "You can perform web searches when internal context is insufficient or the query is time-sensitive; if actions show a web search, acknowledge using it and ground claims in retrieved info."\
+            )
+        else:
+            prompt_parts.append("Web search is DISABLED; rely solely on internal memory. Do not claim current browsing.")
+        if self.delphi_enabled:
+            prompt_parts.append("You may receive predictive analysis output (Delphi) to incorporate prudently.")
+        self.system_prompt = " ".join(prompt_parts)
         print(f"Main Model: {self.llm_model} | Utility Model: {self.utility_model}")
         print(f"Aegis Safety Layer is {'ENABLED' if self.aegis_enabled else 'DISABLED'}.")
+        print(f"Web Search is {'ENABLED' if self.search_enabled else 'DISABLED'}. Delphi is {'ENABLED' if self.delphi_enabled else 'DISABLED'}.")
         self.ollama_host = os.environ.get('OLLAMA_HOST', 'http://127.0.0.1:11434')
         print(f"Ollama host: {self.ollama_host}")
         print("Prometheus Kernel initialized successfully.")
@@ -191,8 +233,8 @@ class PrometheusKernel:
                 if meta is None:
                     print(f"[Kernel][Warning] Encountered None metadata for memory ID: {results['ids'][0][i]}")
                 distance = results['distances'][0][i]
-                id = results['ids'][0][i]
-                memory_part = f"Memory ID: {id}\nSimilarity: {1 - distance:.4f}\nTimestamp: {meta.get('timestamp', 'N/A')}\nSource: {meta.get('source', 'N/A')}\nSummary: {meta.get('summary', 'N/A')}\nContent: \"{doc}\""
+                mem_id = results['ids'][0][i]
+                memory_part = f"Memory ID: {mem_id}\nSimilarity: {1 - distance:.4f}\nTimestamp: {meta.get('timestamp', 'N/A')}\nSource: {meta.get('source', 'N/A')}\nSummary: {meta.get('summary', 'N/A')}\nContent: \"{doc}\""
                 memory_parts.append(memory_part)
             memory_context = (
                 f"\nCONTEXT FROM MEMORY AND WEB SEARCH:\n"
@@ -357,6 +399,7 @@ class PrometheusKernel:
             print("Thank you. I have received the information and stored it in my long-term memory for future reference.")
             print("---------------------------\n")
             self._save_conversation_state()
+            self._maybe_save_void_memory()
             print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
             return
 
@@ -374,12 +417,14 @@ class PrometheusKernel:
 
         is_condensed = len(query) > LARGE_INPUT_THRESHOLD
         time_sensitive = self._is_time_sensitive(query if is_condensed else query)
-        needs_search = time_sensitive or not self._check_if_answerable(
-            query if is_condensed else query,
-            retrieved_memories['documents'][0]
-        )
+        needs_search = False
+        if self.search_enabled:
+            needs_search = time_sensitive or not self._check_if_answerable(
+                query if is_condensed else query,
+                retrieved_memories['documents'][0]
+            )
         print(f"[Kernel][Debug] time_sensitive={time_sensitive}, needs_search={needs_search}")
-        if needs_search:
+        if needs_search and self.search_enabled:
             print("[Kernel] Context is insufficient or time-sensitive. Engaging Antenor web search tools...")
 
             search_gen_start = time.time()
@@ -428,10 +473,16 @@ class PrometheusKernel:
         plan = plan_response['message']['content']
         action_log.append(f"- Generated plan: {plan}")
 
-        # Predict step
-        print("[Debug] Calling delphi.predict")
-        prediction = self.delphi.predict({"type": "consequence_analysis", "data": plan})
-        print("[Debug] delphi.predict completed")
+        # Predict step (optional)
+        prediction = "(Delphi disabled)"
+        if self.delphi_enabled and self.delphi is not None:
+            try:
+                print("[Debug] Calling delphi.predict")
+                prediction = self.delphi.predict({"type": "consequence_analysis", "data": plan})
+                print("[Debug] delphi.predict completed")
+            except Exception as e:
+                prediction = f"(Delphi error: {e})"
+                print(f"[Kernel] Delphi prediction failed: {e}")
         action_log.append(f"- Prediction result: {prediction}")
 
         augment_start = time.time()
@@ -442,47 +493,14 @@ class PrometheusKernel:
         print("[Debug] Starting response generation")
         gen_start = time.time()
         try:
-            # UNCHANGED: Use the powerful MAIN_MODEL for the final answer
-            # Build LLM options (ROCm + context). Use env vars when provided.
-            llm_options = {}
-
-            # Context length
-            num_ctx_env = os.environ.get('OLLAMA_NUM_CTX')
-            if num_ctx_env:
-                try:
-                    llm_options['num_ctx'] = int(num_ctx_env)
-                except ValueError:
-                    print("[Kernel][Warning] Invalid OLLAMA_NUM_CTX value. Expected integer. Falling back to CONTEXT_LIMIT.")
-                    llm_options['num_ctx'] = CONTEXT_LIMIT
-            else:
-                llm_options['num_ctx'] = CONTEXT_LIMIT
-
-            # GPU distribution
-            num_gpu_env = os.environ.get('OLLAMA_NUM_GPU')
-            gpu_split_env = os.environ.get('OLLAMA_GPU_SPLIT')  # e.g., "24,30" to split VRAM across 2 GPUs (GiB)
-            if gpu_split_env:
-                try:
-                    llm_options['gpu_split'] = [float(x) for x in gpu_split_env.split(',') if x.strip() != '']
-                except ValueError:
-                    print("[Kernel][Warning] Invalid OLLAMA_GPU_SPLIT value. Expected comma-separated numbers. Ignoring.")
-            if num_gpu_env:
-                try:
-                    llm_options['num_gpu'] = int(num_gpu_env)
-                except ValueError:
-                    print("[Kernel][Warning] Invalid OLLAMA_NUM_GPU value. Expected integer. Ignoring.")
-            if 'num_gpu' not in llm_options:
-                llm_options['num_gpu'] = 999
-
-            print(f"[Kernel] Ollama options: {llm_options}")
-
+            # Use container defaults for all Ollama options (context/GPU, etc.)
             stream = ollama.chat(
                 model=self.llm_model,
                 messages=[
                     {'role': 'system', 'content': self.system_prompt},
                     {'role': 'user', 'content': augmented_prompt}
                 ],
-                stream=True,
-                options=llm_options
+                stream=True
             )
 
             print("\n--- Prometheus Response ---")
@@ -516,17 +534,21 @@ class PrometheusKernel:
                 print("[Debug] Aegis validation completed")
 
             # --- Dry-run fact-check BEFORE committing to memory -------------------
-            if self._needs_fact_check(query, final_response_text):
+            if self.search_enabled and self._needs_fact_check(query, final_response_text):
                 print("[Kernel][Debug] Potential time-sensitive claims detected. Running Antenor dry-run fact-check...")
                 fc_query = self._generate_search_query(final_response_text)
-                fact_check_results = search_web(fc_query) or []
-                print(f"[Kernel][Debug] Fact-check returned {len(fact_check_results)} web results.")
-                action_log.append(f"- Dry-run fact check for: '{fc_query}', results={len(fact_check_results)}")
+                try:
+                    fact_check_results = search_web(fc_query) or []  # type: ignore
+                    print(f"[Kernel][Debug] Fact-check returned {len(fact_check_results)} web results.")
+                    action_log.append(f"- Dry-run fact check for: '{fc_query}', results={len(fact_check_results)}")
+                except Exception as e:
+                    print(f"[Kernel] Fact-check skipped due to error: {e}")
 
             self.conversation_history.append((query, final_response_text))
             self._summarize_conversation()
             self._should_store_memory_and_inject(final_response_text)
             self._save_conversation_state()
+            self._maybe_save_void_memory()
 
         except Exception as e:
             print(f"Error during final response generation: {e}")
@@ -534,28 +556,49 @@ class PrometheusKernel:
 
         print(f"[Kernel] Total processing time: {time.time() - overall_start:.2f} seconds")
 
+    def _maybe_save_void_memory(self):
+        if not self._void_autosave or not self._void_state_path:
+            return
+        try:
+            ok = self.mnemosyne.save_void_state(self._void_state_path)
+            if ok:
+                print(f"[Kernel][VoidMemory] Autosaved lifecycle state -> {self._void_state_path}")
+        except Exception as e:  # pragma: no cover
+            print(f"[Kernel][VoidMemory] Autosave error: {e}")
+
 
 # --- Main Execution: Interactive Kernel Loop ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prometheus Kernel: An autonomous AI agent.")
     parser.add_argument('--aegis-off', action='store_true', help="Disable the Aegis safety layer for this session.")
     parser.add_argument('--clean', action='store_true', help="Start a new conversation session, clearing previous state.")
+    parser.add_argument('--no-search', action='store_true', help="Disable web search / scraping features.")
+    parser.add_argument('--no-delphi', action='store_true', help="Disable Delphi oracle features.")
+    parser.add_argument('--memory-only', action='store_true', help="Disable search & Delphi (memory system only).")
+    parser.add_argument('--void-state', type=str, default=VOID_STATE_DEFAULT_PATH, help="Path for void memory state JSON (load/save).")
+    parser.add_argument('--no-void-autosave', action='store_true', help="Disable automatic save of void memory lifecycle state after each prompt.")
     args = parser.parse_args()
 
     # CHANGED: Instantiate Mnemosyne with the dedicated embedding model
     mnemosyne_instance = Mnemosyne(db_path=DB_PATH, collection_name=COLLECTION_NAME, model=EMBEDDING_MODEL)
     
     # CHANGED: Instantiate the kernel with both a main and a utility model
+    enable_search = not (args.no_search or args.memory_only)
+    enable_delphi = not (args.no_delphi or args.memory_only)
     kernel = PrometheusKernel(
         mnemosyne_instance=mnemosyne_instance,
         llm_model=MAIN_MODEL,
         utility_model=UTILITY_MODEL,
         aegis_enabled=not args.aegis_off,
-        clean_start=args.clean
+        clean_start=args.clean,
+        enable_search=enable_search,
+    enable_delphi=enable_delphi,
+    void_state_path=args.void_state,
+    void_autosave=not args.no_void_autosave
     )
 
     print("\n--- Prometheus Kernel Interactive Loop ---")
-    print("Enter your query to the agent. Type 'quit' to exit.")
+    print("Enter your query to the agent. Type 'quit' to exit." if not args.memory_only else "Enter your query (Memory-Only Mode). Type 'quit' to exit.")
 
     if mnemosyne_instance.collection.count() == 0:
         print("\n[Kernel] Long-term memory is empty. Injecting sample data for demonstration...")
@@ -572,6 +615,7 @@ if __name__ == "__main__":
         user_query = input("\nUser Query > ").strip()
         if user_query.lower() == 'quit':
             kernel._save_conversation_state()
+            kernel._maybe_save_void_memory()
             print("Shutting down kernel.")
             break
         if user_query:

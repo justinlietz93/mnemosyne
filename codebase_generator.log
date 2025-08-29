@@ -1,6 +1,0 @@
-2025-07-14 00:44:03,828 - INFO - Loaded 10 patterns from /media/justin/16.0 TB IronWolf/git/mnemosyne/.gitignore
-2025-07-14 00:44:03,828 - INFO - Sample patterns: ['.github/copilot-instructions.md', 'mvm_db', '.github/', 'venv/', '.pyc']
-2025-07-14 00:44:03,828 - INFO - Combined .gitignore with comprehensive patterns: 68 total patterns
-2025-07-14 00:44:03,828 - INFO - Starting codebase analysis...
-2025-07-14 00:44:03,828 - INFO - Scanning directory: /media/justin/16.0 TB IronWolf/git/mnemosyne
-2025-07-14 00:44:03,862 - INFO - Combined output saved to: output/codebase_mnemosyne_20250714_004403_complete.txt
